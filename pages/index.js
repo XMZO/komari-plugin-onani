@@ -2,10 +2,23 @@
 
 const STATUS_RPC = "plugin:onani.hostname.status";
 const REFRESH_RPC = "plugin:onani.hostname.refresh";
+const PLUGIN_SHORT = "onani";
+const CURRENT_VERSION = "0.1.6";
+const UPDATE_SOURCE_NAME = "Onani Updates";
+const UPDATE_SOURCE_URL = "https://github.com/XMZO/komari-plugin-onani/releases/latest/download/onani-update.json";
+const PLUGIN_MARKET_API = "/api/admin/plugin/market";
+const UPDATE_CHECK_TIMEOUT_MS = 20_000;
+const UPDATE_INSTALL_TIMEOUT_MS = 60_000;
+const UPDATE_RELOAD_MARKER = "onani:updated-version";
 
 const elements = {
   error: document.getElementById("error"),
+  updateError: document.getElementById("update-error"),
   progress: document.getElementById("progress"),
+  updateCard: document.getElementById("update-card"),
+  updateCurrent: document.getElementById("update-current"),
+  updateStatus: document.getElementById("update-status"),
+  updateAction: document.getElementById("update-action"),
   nodeCount: document.getElementById("node-count"),
   cachedCount: document.getElementById("cached-count"),
   onlineCount: document.getElementById("online-count"),
@@ -33,24 +46,68 @@ let renderFrame = null;
 let lastViewFingerprint = "";
 let viewState = { nodes: {}, statuses: {}, pluginStatus: {} };
 let localBulkPending = false;
+let updateBusy = false;
+let updateMode = "idle";
+let updateMessage = "仅在点击时检查 GitHub Release";
+let currentVersion = CURRENT_VERSION;
+let availableUpdate = null;
 const localPendingUuids = new Set();
 const renderedRows = new Map();
 const renderedRowFingerprints = new Map();
 const rowButtons = new WeakMap();
 const noticeHideTimers = new WeakMap();
 
+async function fetchWithDeadline(resource, init, timeoutMs, label) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return fetch(resource, init);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(resource, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (error && typeof error === "object" && error.name === "AbortError") {
+      throw new Error(`${label}超时（${Math.ceil(timeoutMs / 1000)} 秒）`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function rpc(method, params, options = {}) {
-  const response = await fetch("/api/rpc2", {
+  const response = await fetchWithDeadline("/api/rpc2", {
     method: "POST",
     credentials: "same-origin",
     keepalive: options.keepalive === true,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method, params }),
-  });
+  }, Number(options.timeoutMs) || 0, "RPC 请求");
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   const payload = await response.json();
   if (payload.error) throw new Error(payload.error.message || "RPC 请求失败");
   return payload.result;
+}
+
+async function adminRequest(path, options = {}) {
+  const method = options.method || "GET";
+  const hasBody = Object.prototype.hasOwnProperty.call(options, "body");
+  const response = await fetchWithDeadline(path, {
+    method,
+    credentials: "same-origin",
+    cache: "no-store",
+    keepalive: options.keepalive === true,
+    headers: hasBody ? { "Content-Type": "application/json" } : undefined,
+    body: hasBody ? JSON.stringify(options.body) : undefined,
+  }, Number(options.timeoutMs) || UPDATE_CHECK_TIMEOUT_MS, options.label || "更新请求");
+  let payload = null;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new Error(response.ok ? "Komari 返回了无效的更新响应" : `HTTP ${response.status}`);
+  }
+  if (!response.ok || payload?.status !== "success") {
+    throw new Error(payload?.message || `HTTP ${response.status}`);
+  }
+  return payload.data;
 }
 
 function recordOrEmpty(value) {
@@ -92,6 +149,272 @@ function hideNotice(element) {
     noticeHideTimers.delete(element);
   }, delay);
   noticeHideTimers.set(element, hideTimer);
+}
+
+function parseSemver(value) {
+  if (typeof value !== "string") return null;
+  const match = /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(value.trim());
+  if (!match) return null;
+  const core = match.slice(1, 4).map(Number);
+  if (core.some((part) => !Number.isSafeInteger(part))) return null;
+  const prerelease = match[4] ? match[4].split(".") : [];
+  if (prerelease.some((part) => /^\d+$/.test(part) && !/^(0|[1-9]\d*)$/.test(part))) return null;
+  return { core, prerelease };
+}
+
+function compareSemver(leftValue, rightValue) {
+  const left = parseSemver(leftValue);
+  const right = parseSemver(rightValue);
+  if (!left || !right) return null;
+  for (let index = 0; index < left.core.length; index += 1) {
+    if (left.core[index] !== right.core[index]) return left.core[index] > right.core[index] ? 1 : -1;
+  }
+  if (left.prerelease.length === 0 || right.prerelease.length === 0) {
+    if (left.prerelease.length === right.prerelease.length) return 0;
+    return left.prerelease.length === 0 ? 1 : -1;
+  }
+  const length = Math.max(left.prerelease.length, right.prerelease.length);
+  for (let index = 0; index < length; index += 1) {
+    const leftPart = left.prerelease[index];
+    const rightPart = right.prerelease[index];
+    if (leftPart === undefined || rightPart === undefined) return leftPart === undefined ? -1 : 1;
+    if (leftPart === rightPart) continue;
+    const leftNumeric = /^(0|[1-9]\d*)$/.test(leftPart);
+    const rightNumeric = /^(0|[1-9]\d*)$/.test(rightPart);
+    if (leftNumeric && rightNumeric) return Number(leftPart) > Number(rightPart) ? 1 : -1;
+    if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
+    return leftPart > rightPart ? 1 : -1;
+  }
+  return 0;
+}
+
+function renderUpdater() {
+  elements.updateCurrent.textContent = `v${currentVersion}`;
+  elements.updateStatus.textContent = updateMessage;
+  elements.updateStatus.title = updateMessage;
+  elements.updateCard.classList.remove("available", "error");
+  elements.updateAction.className = "button small update-action";
+
+  const busy = updateBusy || updateMode === "checking" || updateMode === "installing" || updateMode === "installed";
+  let label = "检查更新";
+  if (updateMode === "available" && availableUpdate) {
+    label = `更新到 v${availableUpdate.version}`;
+    elements.updateCard.classList.add("available");
+    elements.updateAction.classList.add("primary");
+  } else if (updateMode === "checking") {
+    label = "检查中";
+  } else if (updateMode === "installing") {
+    label = "正在更新";
+  } else if (updateMode === "installed") {
+    label = "正在重载";
+  } else if (updateMode === "current" || updateMode === "ahead") {
+    label = "再次检查";
+  } else if (updateMode === "error") {
+    label = "重试";
+    elements.updateCard.classList.add("error");
+  }
+  elements.updateAction.textContent = label;
+  elements.updateAction.disabled = busy;
+  if (busy) elements.updateAction.classList.add("busy");
+}
+
+function setUpdater(mode, message, update = null) {
+  updateMode = mode;
+  updateMessage = message;
+  availableUpdate = update;
+  renderUpdater();
+}
+
+function sourceWithURL(sources) {
+  if (!Array.isArray(sources)) return null;
+  return sources.find((source) => source && typeof source === "object" && source.url === UPDATE_SOURCE_URL) || null;
+}
+
+async function listUpdateSources() {
+  const sources = await adminRequest(`${PLUGIN_MARKET_API}/sources`, { label: "读取更新源" });
+  if (!Array.isArray(sources)) throw new Error("Komari 返回了无效的更新源列表");
+  return sources;
+}
+
+async function ensureUpdateSource() {
+  let source = sourceWithURL(await listUpdateSources());
+  if (source && source.enabled === true) return source;
+
+  if (source) {
+    const approved = window.confirm("Onani 更新源目前已禁用。是否重新启用它并检查 GitHub Release？");
+    if (!approved) return null;
+    return adminRequest(`${PLUGIN_MARKET_API}/sources/${encodeURIComponent(source.id)}`, {
+      method: "PUT",
+      body: {
+        name: typeof source.name === "string" && source.name.trim() ? source.name : UPDATE_SOURCE_NAME,
+        url: UPDATE_SOURCE_URL,
+        enabled: true,
+      },
+      label: "启用更新源",
+    });
+  }
+
+  try {
+    return await adminRequest(`${PLUGIN_MARKET_API}/sources`, {
+      method: "POST",
+      body: { name: UPDATE_SOURCE_NAME, url: UPDATE_SOURCE_URL, enabled: true },
+      label: "添加更新源",
+    });
+  } catch (error) {
+    const existing = sourceWithURL(await listUpdateSources().catch(() => []));
+    if (existing?.enabled === true) return existing;
+    throw error;
+  }
+}
+
+function installedVersion(plugins) {
+  if (!Array.isArray(plugins)) return CURRENT_VERSION;
+  const installed = plugins.find(
+    (plugin) => plugin && typeof plugin === "object" && String(plugin.short || "").toLowerCase() === PLUGIN_SHORT,
+  );
+  return typeof installed?.version === "string" && installed.version.trim() ? installed.version.trim() : CURRENT_VERSION;
+}
+
+async function checkForUpdates() {
+  if (updateBusy) return;
+  updateBusy = true;
+  hideNotice(elements.updateError);
+  setUpdater("checking", "正在读取自有更新源", null);
+  try {
+    const source = await ensureUpdateSource();
+    if (!source) {
+      setUpdater("idle", "已取消检查；未更改更新源", null);
+      return;
+    }
+    if (typeof source.id !== "string" || !source.id) throw new Error("更新源缺少有效 ID");
+
+    const [catalog, installedPlugins] = await Promise.all([
+      adminRequest(`${PLUGIN_MARKET_API}/catalog?refresh=true`, { label: "检查 GitHub Release" }),
+      rpc("admin:listPlugins", undefined, { timeoutMs: 10_000 }),
+    ]);
+    const catalogData = recordOrEmpty(catalog);
+    const sourceStatus = Array.isArray(catalogData.sources)
+      ? catalogData.sources.find((item) => item?.id === source.id)
+      : null;
+    if (sourceStatus?.error) throw new Error(`更新源不可用：${sourceStatus.error}`);
+
+    const latest = Array.isArray(catalogData.plugins)
+      ? catalogData.plugins.find(
+        (plugin) => plugin?.source_id === source.id && String(plugin?.short || "").toLowerCase() === PLUGIN_SHORT,
+      )
+      : null;
+    if (!latest || typeof latest.version !== "string") throw new Error("更新源中没有找到 Onani 安装包");
+    if (latest.installable !== true) {
+      throw new Error(`v${latest.version} 与当前 Komari 不兼容，或 Release 缺少可校验的安装包`);
+    }
+
+    currentVersion = installedVersion(installedPlugins);
+    const comparison = compareSemver(latest.version, currentVersion);
+    if (comparison === null) throw new Error("更新源返回了无法识别的版本号");
+    if (comparison > 0) {
+      setUpdater("available", `发现新版本 v${latest.version}`, { sourceId: source.id, version: latest.version });
+    } else if (comparison === 0) {
+      setUpdater("current", "已是最新正式版本", null);
+    } else {
+      setUpdater("ahead", `当前版本高于更新源 v${latest.version}`, null);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "检查更新失败";
+    setUpdater("error", "检查更新失败", null);
+    showNotice(elements.updateError, message);
+  } finally {
+    updateBusy = false;
+    renderUpdater();
+  }
+}
+
+async function refreshUpdatedAssets() {
+  const assets = ["./index.css", "./index.js"];
+  await Promise.allSettled(assets.map(async (asset) => {
+    const response = await fetchWithDeadline(new URL(asset, window.location.href), {
+      method: "GET",
+      credentials: "same-origin",
+      cache: "reload",
+    }, 8_000, "刷新页面资源");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  }));
+}
+
+async function installAvailableUpdate() {
+  if (updateBusy || !availableUpdate) return;
+  const target = availableUpdate;
+  const approved = window.confirm(
+    `将由 Komari 从 GitHub Release 把 Onani v${currentVersion} 更新到 v${target.version}。旧代码目录会被替换，插件配置和主机名缓存会保留。是否继续？`,
+  );
+  if (!approved) return;
+
+  updateBusy = true;
+  hideNotice(elements.updateError);
+  if (timer !== null) {
+    clearTimeout(timer);
+    timer = null;
+  }
+  setUpdater("installing", "Komari 正在下载、校验并安装", target);
+  let reloading = false;
+  try {
+    const installed = recordOrEmpty(await adminRequest(`${PLUGIN_MARKET_API}/install`, {
+      method: "POST",
+      body: { source_id: target.sourceId, short: PLUGIN_SHORT },
+      timeoutMs: UPDATE_INSTALL_TIMEOUT_MS,
+      label: "安装更新",
+      keepalive: true,
+    }));
+    if (String(installed.short || "").toLowerCase() !== PLUGIN_SHORT || typeof installed.version !== "string") {
+      throw new Error("Komari 安装结果与 Onani 不匹配");
+    }
+    const installedComparison = compareSemver(installed.version, target.version);
+    if (installedComparison === null || installedComparison < 0) {
+      throw new Error("Komari 安装结果低于确认的目标版本");
+    }
+
+    currentVersion = installed.version;
+    setUpdater("installed", `已安装 v${installed.version}，正在重新载入`, null);
+    await refreshUpdatedAssets();
+    try {
+      window.sessionStorage?.setItem(UPDATE_RELOAD_MARKER, installed.version);
+    } catch {
+      // Storage may be disabled; reloading still activates the new files.
+    }
+    reloading = true;
+    window.location.reload();
+  } catch (error) {
+    const rawMessage = error instanceof Error ? error.message : "更新失败";
+    const permissionChanged = /permission|approval|权限/i.test(rawMessage);
+    const message = permissionChanged
+      ? "新版已写入，但权限声明发生变化；请回到插件管理重新启用并批准权限。"
+      : rawMessage;
+    setUpdater("error", "更新未完成", null);
+    showNotice(elements.updateError, message);
+  } finally {
+    if (!reloading) {
+      updateBusy = false;
+      renderUpdater();
+      schedule(3000);
+    }
+  }
+}
+
+function consumeUpdateReloadMarker() {
+  try {
+    const updatedVersion = window.sessionStorage?.getItem(UPDATE_RELOAD_MARKER);
+    window.sessionStorage?.removeItem(UPDATE_RELOAD_MARKER);
+    if (updatedVersion === CURRENT_VERSION) {
+      currentVersion = CURRENT_VERSION;
+      setUpdater("current", `已成功更新到 v${CURRENT_VERSION}`, null);
+    }
+  } catch {
+    // A blocked session store only suppresses the one-time success message.
+  }
+}
+
+async function handleUpdateAction() {
+  if (updateMode === "available" && availableUpdate) await installAvailableUpdate();
+  else await checkForUpdates();
 }
 
 function formatTime(value) {
@@ -386,7 +709,7 @@ function clearFilters() {
 }
 
 async function loadView() {
-  if (loading || document.hidden) return;
+  if (loading || document.hidden || updateMode === "installing" || updateMode === "installed") return;
   loading = true;
   try {
     const [nodes, statuses, pluginStatus] = await Promise.all([
@@ -473,6 +796,7 @@ elements.onlineFilter.addEventListener("change", scheduleRender);
 elements.cacheFilter.addEventListener("change", scheduleRender);
 elements.clearFilters.addEventListener("click", clearFilters);
 elements.emptyClear.addEventListener("click", clearFilters);
+elements.updateAction.addEventListener("click", () => void handleUpdateAction());
 elements.refreshDue.addEventListener("click", () => void startRefresh({ force: false }));
 elements.forceAll.addEventListener("click", () => {
   if (window.confirm("强制刷新会对全部在线节点各执行一次固定命令 hostname，是否继续？")) {
@@ -484,4 +808,6 @@ document.addEventListener("visibilitychange", () => {
   if (!document.hidden) void loadView();
 });
 
+renderUpdater();
+consumeUpdateReloadMarker();
 void loadView();

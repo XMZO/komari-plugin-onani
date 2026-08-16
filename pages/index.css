@@ -28,7 +28,70 @@ code {
 }
 
 .app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
   margin-bottom: 18px;
+}
+
+.app-heading {
+  min-width: 0;
+}
+
+.update-card {
+  display: flex;
+  align-items: center;
+  flex: 0 1 410px;
+  justify-content: space-between;
+  min-width: 310px;
+  min-height: 66px;
+  gap: 14px;
+  padding: 12px 13px 12px 15px;
+  border: 1px solid light-dark(#dfe4ec, #303948);
+  border-radius: 12px;
+  background: light-dark(#fff, #181e28);
+  box-shadow: 0 8px 28px rgb(16 24 40 / 5%);
+  transition: border-color 160ms ease, background-color 160ms ease;
+}
+
+.update-card.available {
+  border-color: light-dark(#9ca8ff, #5968bd);
+  background: light-dark(#f8f9ff, #1b2135);
+}
+
+.update-card.error {
+  border-color: light-dark(#efc1be, #704147);
+}
+
+.update-copy {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+}
+
+.update-version {
+  color: light-dark(#667085, #aeb7c8);
+  font-size: 12px;
+}
+
+.update-version strong {
+  margin-left: 4px;
+  color: light-dark(#344054, #e0e5ef);
+  font-size: 13px;
+}
+
+.update-status {
+  overflow: hidden;
+  color: light-dark(#475467, #c5ccd8);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.button.update-action {
+  min-width: 94px;
+  flex: 0 0 auto;
 }
 
 .feature-header {
@@ -491,6 +554,7 @@ footer {
 
 @media (prefers-reduced-motion: reduce) {
   .button,
+  .update-card,
   input,
   select,
   tbody tr {
@@ -514,6 +578,17 @@ footer {
 
   .shell {
     padding: 18px 14px;
+  }
+
+  .app-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .update-card {
+    flex-basis: auto;
+    width: 100%;
+    min-width: 0;
   }
 
   .feature-header {

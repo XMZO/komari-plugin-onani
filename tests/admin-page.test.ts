@@ -6,6 +6,8 @@ import vm from "node:vm";
 const html = fs.readFileSync(new URL("../pages/index.html", import.meta.url), "utf8");
 const script = fs.readFileSync(new URL("../pages/index.js", import.meta.url), "utf8");
 const styles = fs.readFileSync(new URL("../pages/index.css", import.meta.url), "utf8");
+const manifest = JSON.parse(fs.readFileSync(new URL("../komari-plugin.json", import.meta.url), "utf8")) as { version: string };
+const packageInfo = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string };
 
 class FakeElement {
   value = "";
@@ -60,10 +62,16 @@ class FakeElement {
   }
 }
 
-function createPageContext(): { context: vm.Context; elements: Map<string, FakeElement> } {
+type FakeBrowserState = {
+  confirmations: number;
+  reloads: number;
+  session: Map<string, string>;
+};
+
+function createPageContext(): { context: vm.Context; elements: Map<string, FakeElement>; browser: FakeBrowserState } {
   const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);
   const elements = new Map(ids.map((id) => [id, new FakeElement()]));
-  for (const id of ["error", "progress", "clear-filters", "empty", "empty-clear"]) {
+  for (const id of ["error", "update-error", "progress", "clear-filters", "empty", "empty-clear"]) {
     elements.get(id)!.hidden = true;
   }
   elements.get("online-filter")!.value = "all";
@@ -82,15 +90,34 @@ function createPageContext(): { context: vm.Context; elements: Map<string, FakeE
     },
     addEventListener() {},
   };
+  const browser: FakeBrowserState = { confirmations: 0, reloads: 0, session: new Map() };
+  const window = {
+    confirm: () => {
+      browser.confirmations += 1;
+      return true;
+    },
+    setTimeout,
+    location: {
+      href: "https://komari.example/api/admin/plugin/onani/pages/index.html",
+      reload: () => { browser.reloads += 1; },
+    },
+    sessionStorage: {
+      getItem: (key: string) => browser.session.get(key) ?? null,
+      setItem: (key: string, value: string) => browser.session.set(key, value),
+      removeItem: (key: string) => browser.session.delete(key),
+    },
+  };
   const context = vm.createContext({
     document,
-    window: { confirm: () => true },
+    window,
+    AbortController,
+    URL,
     console,
     setTimeout,
     clearTimeout,
   });
   vm.runInContext(script, context, { filename: "pages/index.js" });
-  return { context, elements };
+  return { context, elements, browser };
 }
 
 function fixtureData(): Record<string, unknown> {
@@ -138,6 +165,15 @@ test("admin page keeps every script binding present and avoids unsafe HTML sinks
   assert.doesNotMatch(html, /\son[a-z]+\s*=/i);
   assert.doesNotMatch(script, /\b(?:innerHTML|outerHTML|insertAdjacentHTML|document\.write)\b/);
   assert.match(script, /rpc\(REFRESH_RPC, params, \{ keepalive: true \}\)/);
+  assert.match(script, /releases\/latest\/download\/onani-update\.json/);
+  assert.match(script, /PLUGIN_MARKET_API}\/install/);
+  assert.match(script, /cache: "no-store"/);
+  assert.match(script, /cache: "reload"/);
+  assert.match(script, /sessionStorage\?\.removeItem\(UPDATE_RELOAD_MARKER\)/);
+  assert.doesNotMatch(script, /首次检查更新需要向 Komari 添加/);
+  assert.doesNotMatch(script, /\blocalStorage\b|\bindexedDB\b|caches\.open|serviceWorker/);
+  assert.match(html, /id="update-card"/);
+  assert.match(html, /id="update-action"/);
   assert.match(html, /id="table-wrap"[\s\S]*?role="region"[\s\S]*?tabindex="0"/);
   assert.match(styles, /\.table-wrap\s*{[^}]*max-height:[^}]*overflow:\s*auto/s);
   assert.match(styles, /th\s*{[^}]*position:\s*sticky/s);
@@ -147,6 +183,149 @@ test("admin page keeps every script binding present and avoids unsafe HTML sinks
   assert.match(styles, /@keyframes\s+row-updated/);
   assert.match(styles, /@keyframes\s+busy-spin/);
   assert.match(styles, /@media\s*\(prefers-reduced-motion:\s*reduce\)/);
+});
+
+test("page, package and manifest versions stay synchronized", () => {
+  const currentVersion = script.match(/const CURRENT_VERSION = "([^"]+)";/)?.[1];
+  assert.equal(currentVersion, manifest.version);
+  assert.equal(packageInfo.version, manifest.version);
+  assert.match(html, new RegExp(`id="update-current">v${manifest.version.replace(/\./g, "\\.")}<`));
+});
+
+test("updater compares stable and prerelease versions without lexical mistakes", () => {
+  const { context } = createPageContext();
+  const comparisons = vm.runInContext(`JSON.stringify([
+    compareSemver("0.1.10", "0.1.9"),
+    compareSemver("1.0.0", "1.0.0-rc.1"),
+    compareSemver("1.0.0-rc.2", "1.0.0-rc.10"),
+    compareSemver("v1.2.3+build.2", "1.2.3+build.1"),
+    compareSemver("not-a-version", "1.0.0"),
+  ])`, context) as string;
+  assert.deepEqual(JSON.parse(comparisons), [1, 1, -1, 0, null]);
+});
+
+test("self-update source registration is automatic and idempotent", async () => {
+  const { context, browser } = createPageContext();
+  const requests: Array<{ path: string; method: string }> = [];
+  const sources: Array<Record<string, unknown>> = [];
+  (context as Record<string, unknown>).fetch = async (resource: unknown, init?: { method?: string }) => {
+    const path = String(resource);
+    const method = init?.method || "GET";
+    requests.push({ path, method });
+    if (path.endsWith("/sources") && method === "GET") {
+      return { ok: true, status: 200, json: async () => ({ status: "success", data: sources }) };
+    }
+    if (path.endsWith("/sources") && method === "POST") {
+      const source = {
+        id: "onani-source",
+        name: "Onani Updates",
+        url: "https://github.com/XMZO/komari-plugin-onani/releases/latest/download/onani-update.json",
+        enabled: true,
+      };
+      sources.push(source);
+      return { ok: true, status: 200, json: async () => ({ status: "success", data: source }) };
+    }
+    throw new Error(`unexpected request: ${method} ${path}`);
+  };
+
+  const first = await vm.runInContext("ensureUpdateSource()", context) as Record<string, unknown>;
+  const second = await vm.runInContext("ensureUpdateSource()", context) as Record<string, unknown>;
+  assert.equal(first.id, "onani-source");
+  assert.equal(second.id, "onani-source");
+  assert.equal(browser.confirmations, 0);
+  assert.equal(requests.filter((request) => request.method === "POST").length, 1);
+});
+
+test("update check selects only the private source and compares the installed version", async () => {
+  const { context, elements } = createPageContext();
+  const source = {
+    id: "onani-source",
+    name: "Onani Updates",
+    url: "https://github.com/XMZO/komari-plugin-onani/releases/latest/download/onani-update.json",
+    enabled: true,
+  };
+  (context as Record<string, unknown>).fetch = async (resource: unknown, init?: { body?: string; method?: string }) => {
+    const path = String(resource);
+    if (path === "/api/rpc2") {
+      const request = JSON.parse(init?.body || "{}") as { method?: string };
+      assert.equal(request.method, "admin:listPlugins");
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ jsonrpc: "2.0", result: [{ short: "onani", version: "0.1.6" }] }),
+      };
+    }
+    if (path.endsWith("/sources")) {
+      return { ok: true, status: 200, json: async () => ({ status: "success", data: [source] }) };
+    }
+    if (path.includes("/catalog?refresh=true")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          status: "success",
+          data: {
+            sources: [{ id: "official", error: "ignored" }, { id: source.id, count: 1 }],
+            plugins: [
+              { short: "onani", version: "9.9.9", source_id: "official", installable: true },
+              { short: "onani", version: "0.1.7", source_id: source.id, installable: true },
+            ],
+          },
+        }),
+      };
+    }
+    throw new Error(`unexpected request: ${path}`);
+  };
+
+  await vm.runInContext("checkForUpdates()", context);
+  const state = JSON.parse(vm.runInContext("JSON.stringify({ updateMode, currentVersion, availableUpdate })", context) as string);
+  assert.deepEqual(state, {
+    updateMode: "available",
+    currentVersion: "0.1.6",
+    availableUpdate: { sourceId: "onani-source", version: "0.1.7" },
+  });
+  assert.equal(elements.get("update-action")!.textContent, "更新到 v0.1.7");
+});
+
+test("successful update reloads fixed asset URLs and leaves only a transient marker", async () => {
+  const { context, browser } = createPageContext();
+  const assetRequests: Array<{ path: string; cache?: string }> = [];
+  (context as Record<string, unknown>).fetch = async (
+    resource: unknown,
+    init?: { body?: string; cache?: string; method?: string },
+  ) => {
+    const path = String(resource);
+    if (path.endsWith("/market/install")) {
+      const body = JSON.parse(init?.body || "{}") as Record<string, unknown>;
+      assert.deepEqual(body, { source_id: "onani-source", short: "onani" });
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ status: "success", data: { short: "onani", version: "0.1.7" } }),
+      };
+    }
+    if (path.endsWith("/index.css") || path.endsWith("/index.js")) {
+      assetRequests.push({ path, cache: init?.cache });
+      return { ok: true, status: 200 };
+    }
+    throw new Error(`unexpected request: ${path}`);
+  };
+
+  vm.runInContext(`
+    currentVersion = "0.1.6";
+    updateMode = "available";
+    availableUpdate = { sourceId: "onani-source", version: "0.1.7" };
+    renderUpdater();
+  `, context);
+  await vm.runInContext("installAvailableUpdate()", context);
+
+  assert.equal(browser.reloads, 1);
+  assert.equal(browser.session.get("onani:updated-version"), "0.1.7");
+  assert.deepEqual(assetRequests.map((request) => request.cache), ["reload", "reload"]);
+  assert.deepEqual(assetRequests.map((request) => new URL(request.path).pathname).sort(), [
+    "/api/admin/plugin/onani/pages/index.css",
+    "/api/admin/plugin/onani/pages/index.js",
+  ]);
 });
 
 test("hostname search and filters operate only on the loaded view data", () => {
