@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:"
+    />
+    <title>Onani 工具箱</title>
+    <link rel="stylesheet" href="./index.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="app-header">
+        <p class="eyebrow">ONANI TOOLBOX</p>
+        <h1>Onani 工具箱</h1>
+        <p class="subtitle">集中管理插件提供的节点辅助功能。</p>
+      </header>
+
+      <nav class="feature-tabs" role="tablist" aria-label="工具箱功能">
+        <button
+          id="hostname-tab"
+          class="feature-tab active"
+          type="button"
+          role="tab"
+          aria-selected="true"
+          aria-controls="hostname-panel"
+        >
+          主机名
+          <span id="hostname-tab-count" class="tab-count" aria-label="节点数量">—</span>
+        </button>
+      </nav>
+
+      <section id="hostname-panel" role="tabpanel" aria-labelledby="hostname-tab">
+        <header class="feature-header">
+          <div>
+            <h2>节点主机名</h2>
+            <p class="subtitle">查看 VPS 的系统主机名；仅在缓存需要刷新时对在线节点执行固定命令 <code>hostname</code>。</p>
+          </div>
+          <div class="actions">
+            <button id="refresh-due" class="button primary" type="button">刷新缺失/过期</button>
+            <button id="force-all" class="button" type="button">强制刷新全部在线节点</button>
+          </div>
+        </header>
+
+        <div class="feedback" aria-label="操作状态">
+          <div id="error" class="notice error" role="alert" hidden></div>
+          <div id="progress" class="notice" role="status" aria-live="polite" hidden></div>
+        </div>
+
+        <section class="summary" aria-label="主机名缓存摘要">
+          <article><span>节点总数</span><strong id="node-count">—</strong></article>
+          <article><span>已获取主机名</span><strong id="cached-count">—</strong></article>
+          <article><span>在线节点</span><strong id="online-count">—</strong></article>
+          <article><span>缓存周期</span><strong id="cache-days">—</strong></article>
+        </section>
+
+        <section class="panel">
+          <div class="toolbar">
+            <label class="search-field" for="hostname-search">
+              <span class="visually-hidden">搜索节点名、系统主机名或 UUID</span>
+              <input
+                id="hostname-search"
+                type="search"
+                maxlength="253"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="搜索节点名、主机名或 UUID"
+              />
+            </label>
+            <select id="online-filter" aria-label="按在线状态筛选">
+              <option value="all">全部在线状态</option>
+              <option value="online">仅在线</option>
+              <option value="offline">仅离线</option>
+            </select>
+            <select id="cache-filter" aria-label="按采集状态筛选">
+              <option value="all">全部采集状态</option>
+              <option value="cached">已缓存</option>
+              <option value="missing">未采集</option>
+              <option value="expired">已过期</option>
+              <option value="failed">采集失败</option>
+            </select>
+            <button id="clear-filters" class="button subtle" type="button" hidden>清除筛选</button>
+            <span id="result-count" class="result-count" role="status" aria-live="polite">—</span>
+          </div>
+
+          <div
+            id="table-wrap"
+            class="table-wrap"
+            role="region"
+            aria-label="主机名节点列表"
+            tabindex="0"
+          >
+            <table aria-describedby="result-count">
+              <thead>
+                <tr>
+                  <th>面板节点</th>
+                  <th>系统主机名</th>
+                  <th>状态</th>
+                  <th>采集时间</th>
+                  <th class="action-column">操作</th>
+                </tr>
+              </thead>
+              <tbody id="node-list"></tbody>
+            </table>
+          </div>
+          <div id="empty" class="empty" hidden>
+            <strong id="empty-title">暂无节点</strong>
+            <span id="empty-description">Komari 当前没有可显示的节点。</span>
+            <button id="empty-clear" class="button small" type="button" hidden>清除筛选</button>
+          </div>
+        </section>
+
+        <footer>
+          刷新由 Komari 在后台执行，任务加入队列后关闭页面不会中断。最多并行 4 个作业；Agent 最长等待 20 秒，单个作业从点击起最多保留 30 秒。
+        </footer>
+      </section>
+    </main>
+    <script src="./index.js"></script>
+  </body>
+</html>

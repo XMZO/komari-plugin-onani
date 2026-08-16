@@ -1,0 +1,35 @@
+{
+  "name": "komari-plugin-onani",
+  "version": "0.1.4",
+  "private": true,
+  "description": "A small, security-focused Komari toolbox plugin.",
+  "packageManager": "pnpm@10.30.3",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "check": "komari-plugin-dev check",
+    "build": "komari-plugin-dev build",
+    "pack": "komari-plugin-dev pack",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/hostname-core.test.ts tests/json-store.test.ts tests/async-timeout.test.ts tests/bounded-job-queue.test.ts tests/admin-page.test.ts",
+    "verify": "pnpm typecheck && pnpm test && pnpm check && pnpm build",
+    "plugin:install": "komari-plugin-dev install --enable",
+    "dev": "komari-plugin-dev dev"
+  },
+  "komari": {
+    "source": "src/plugin.ts",
+    "files": [
+      "pages"
+    ]
+  },
+  "dependencies": {
+    "@komari-monitor/plugin-sdk": "1.4.3"
+  },
+  "devDependencies": {
+    "@komari-monitor/plugin-dev": "1.4.3",
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.2"
+  }
+}

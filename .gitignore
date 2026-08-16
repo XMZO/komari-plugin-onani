@@ -1,0 +1,6 @@
+node_modules/
+*.zip
+*.tgz
+coverage/
+komari.local.json
+.DS_Store

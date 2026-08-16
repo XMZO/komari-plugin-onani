@@ -1,0 +1,76 @@
+{
+  "$schema": "./node_modules/@komari-monitor/plugin-sdk/schema/komari-plugin.schema.json",
+  "name": {
+    "zh-CN": "Onani 工具箱",
+    "en": "Onani Toolbox"
+  },
+  "short": "onani",
+  "description": {
+    "zh-CN": "轻量、安全、可扩展的 Komari 工具箱；当前提供节点主机名采集与缓存。",
+    "en": "A small, security-focused and extensible Komari toolbox. Currently provides cached node hostname discovery."
+  },
+  "version": "0.1.4",
+  "entry": "script.js",
+  "author": "XMZO",
+  "url": "https://github.com/XMZO/komari-plugin-onani",
+  "komari": ">=1.4.3",
+  "permissions": {
+    "node": true,
+    "allowSystemRPC": true,
+    "timeout": 10
+  },
+  "configuration": {
+    "type": "managed",
+    "data": [
+      {
+        "key": "hostname_enabled",
+        "name": {
+          "zh-CN": "启用主机名采集",
+          "en": "Enable hostname discovery"
+        },
+        "type": "switch",
+        "default": true,
+        "help": {
+          "zh-CN": "关闭后停止自动采集，已有缓存会保留。",
+          "en": "Stops automatic discovery when disabled. Existing cached values are preserved."
+        }
+      },
+      {
+        "key": "hostname_auto_refresh",
+        "name": {
+          "zh-CN": "自动刷新过期缓存",
+          "en": "Refresh stale cache automatically"
+        },
+        "type": "switch",
+        "default": true,
+        "help": {
+          "zh-CN": "每 6 小时检查一次；只有缺失或过期的在线节点才会执行 hostname。失败后至少等待 24 小时再重试。",
+          "en": "Checks every 6 hours. Only online nodes with missing or stale values execute hostname. Failures back off for at least 24 hours."
+        }
+      },
+      {
+        "key": "hostname_cache_days",
+        "name": {
+          "zh-CN": "主机名缓存天数",
+          "en": "Hostname cache lifetime (days)"
+        },
+        "type": "number",
+        "default": 30,
+        "help": {
+          "zh-CN": "允许范围 1–3650 天；无效值会安全回退到 30 天。也可在插件页面手动强制刷新。",
+          "en": "Allowed range: 1–3650 days. Invalid values safely fall back to 30 days. Manual forced refresh remains available."
+        }
+      }
+    ]
+  },
+  "pages": [
+    {
+      "file": "pages/index.html",
+      "title": {
+        "zh-CN": "Onani 工具箱",
+        "en": "Onani Toolbox"
+      },
+      "visibility": "admin"
+    }
+  ]
+}
