@@ -9,16 +9,24 @@ const styles = fs.readFileSync(new URL("../pages/index.css", import.meta.url), "
 const manifest = JSON.parse(fs.readFileSync(new URL("../komari-plugin.json", import.meta.url), "utf8")) as { version: string };
 const packageInfo = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string };
 
+type FakeEvent = {
+  target: FakeElement;
+  defaultPrevented: boolean;
+  preventDefault(): void;
+};
+
 class FakeElement {
   value = "";
   hidden = false;
   disabled = false;
+  open = false;
   textContent = "";
   className = "";
   title = "";
   type = "";
   focused = false;
   children: unknown[] = [];
+  private listeners = new Map<string, Array<(event: FakeEvent) => void>>();
   classList = {
     add: (...tokens: string[]) => {
       const classes = new Set(this.className.split(/\s+/).filter(Boolean));
@@ -55,7 +63,40 @@ class FakeElement {
     return child;
   }
 
-  addEventListener(): void {}
+  addEventListener(type: string, listener: (event: FakeEvent) => void): void {
+    const listeners = this.listeners.get(type) ?? [];
+    listeners.push(listener);
+    this.listeners.set(type, listeners);
+  }
+
+  dispatch(type: string, target: FakeElement = this): void {
+    const event: FakeEvent = {
+      target,
+      defaultPrevented: false,
+      preventDefault() {
+        this.defaultPrevented = true;
+      },
+    };
+    for (const listener of this.listeners.get(type) ?? []) listener(event);
+  }
+
+  showModal(): void {
+    this.open = true;
+  }
+
+  close(): void {
+    if (!this.open) return;
+    this.open = false;
+    this.dispatch("close");
+  }
+
+  setAttribute(name: string): void {
+    if (name === "open") this.open = true;
+  }
+
+  removeAttribute(name: string): void {
+    if (name === "open") this.open = false;
+  }
 
   focus(): void {
     this.focused = true;
@@ -63,7 +104,6 @@ class FakeElement {
 }
 
 type FakeBrowserState = {
-  confirmations: number;
   reloads: number;
   session: Map<string, string>;
 };
@@ -90,12 +130,8 @@ function createPageContext(): { context: vm.Context; elements: Map<string, FakeE
     },
     addEventListener() {},
   };
-  const browser: FakeBrowserState = { confirmations: 0, reloads: 0, session: new Map() };
+  const browser: FakeBrowserState = { reloads: 0, session: new Map() };
   const window = {
-    confirm: () => {
-      browser.confirmations += 1;
-      return true;
-    },
     setTimeout,
     location: {
       href: "https://komari.example/api/admin/plugin/onani/pages/index.html",
@@ -171,9 +207,12 @@ test("admin page keeps every script binding present and avoids unsafe HTML sinks
   assert.match(script, /cache: "reload"/);
   assert.match(script, /sessionStorage\?\.removeItem\(UPDATE_RELOAD_MARKER\)/);
   assert.doesNotMatch(script, /首次检查更新需要向 Komari 添加/);
+  assert.doesNotMatch(script, /window\.confirm|\bconfirm\s*\(/);
   assert.doesNotMatch(script, /\blocalStorage\b|\bindexedDB\b|caches\.open|serviceWorker/);
   assert.match(html, /id="update-card"/);
   assert.match(html, /id="update-action"/);
+  assert.match(html, /<dialog[\s\S]*?id="confirm-dialog"/);
+  assert.match(styles, /\.confirm-dialog::backdrop/);
   assert.match(html, /id="table-wrap"[\s\S]*?role="region"[\s\S]*?tabindex="0"/);
   assert.match(styles, /\.table-wrap\s*{[^}]*max-height:[^}]*overflow:\s*auto/s);
   assert.match(styles, /th\s*{[^}]*position:\s*sticky/s);
@@ -204,8 +243,35 @@ test("updater compares stable and prerelease versions without lexical mistakes",
   assert.deepEqual(JSON.parse(comparisons), [1, 1, -1, 0, null]);
 });
 
+test("confirmations stay inside the page and resolve only from dialog actions", async () => {
+  const { context, elements } = createPageContext();
+  const dialog = elements.get("confirm-dialog")!;
+
+  const cancelled = vm.runInContext(`requestConfirmation({
+    title: "更新到 v0.1.8",
+    message: "测试确认内容",
+    confirmLabel: "开始更新",
+  })`, context) as Promise<boolean>;
+  assert.equal(dialog.open, true);
+  assert.equal(elements.get("confirm-title")!.textContent, "更新到 v0.1.8");
+  assert.equal(elements.get("confirm-message")!.textContent, "测试确认内容");
+  assert.equal(elements.get("confirm-accept")!.textContent, "开始更新");
+  assert.equal(elements.get("confirm-cancel")!.focused, true);
+  elements.get("confirm-cancel")!.dispatch("click");
+  assert.equal(await cancelled, false);
+  assert.equal(dialog.open, false);
+
+  const accepted = vm.runInContext(`requestConfirmation({
+    title: "强制刷新全部在线节点",
+    message: "测试确认内容",
+  })`, context) as Promise<boolean>;
+  elements.get("confirm-accept")!.dispatch("click");
+  assert.equal(await accepted, true);
+  assert.equal(dialog.open, false);
+});
+
 test("self-update source registration is automatic and idempotent", async () => {
-  const { context, browser } = createPageContext();
+  const { context } = createPageContext();
   const requests: Array<{ path: string; method: string }> = [];
   const sources: Array<Record<string, unknown>> = [];
   (context as Record<string, unknown>).fetch = async (resource: unknown, init?: { method?: string }) => {
@@ -232,7 +298,6 @@ test("self-update source registration is automatic and idempotent", async () => 
   const second = await vm.runInContext("ensureUpdateSource()", context) as Record<string, unknown>;
   assert.equal(first.id, "onani-source");
   assert.equal(second.id, "onani-source");
-  assert.equal(browser.confirmations, 0);
   assert.equal(requests.filter((request) => request.method === "POST").length, 1);
 });
 
@@ -252,7 +317,7 @@ test("update check selects only the private source and compares the installed ve
       return {
         ok: true,
         status: 200,
-        json: async () => ({ jsonrpc: "2.0", result: [{ short: "onani", version: "0.1.6" }] }),
+        json: async () => ({ jsonrpc: "2.0", result: [{ short: "onani", version: "0.1.7" }] }),
       };
     }
     if (path.endsWith("/sources")) {
@@ -268,7 +333,7 @@ test("update check selects only the private source and compares the installed ve
             sources: [{ id: "official", error: "ignored" }, { id: source.id, count: 1 }],
             plugins: [
               { short: "onani", version: "9.9.9", source_id: "official", installable: true },
-              { short: "onani", version: "0.1.7", source_id: source.id, installable: true },
+              { short: "onani", version: "0.1.8", source_id: source.id, installable: true },
             ],
           },
         }),
@@ -281,14 +346,14 @@ test("update check selects only the private source and compares the installed ve
   const state = JSON.parse(vm.runInContext("JSON.stringify({ updateMode, currentVersion, availableUpdate })", context) as string);
   assert.deepEqual(state, {
     updateMode: "available",
-    currentVersion: "0.1.6",
-    availableUpdate: { sourceId: "onani-source", version: "0.1.7" },
+    currentVersion: "0.1.7",
+    availableUpdate: { sourceId: "onani-source", version: "0.1.8" },
   });
-  assert.equal(elements.get("update-action")!.textContent, "更新到 v0.1.7");
+  assert.equal(elements.get("update-action")!.textContent, "更新到 v0.1.8");
 });
 
 test("successful update reloads fixed asset URLs and leaves only a transient marker", async () => {
-  const { context, browser } = createPageContext();
+  const { context, elements, browser } = createPageContext();
   const assetRequests: Array<{ path: string; cache?: string }> = [];
   (context as Record<string, unknown>).fetch = async (
     resource: unknown,
@@ -301,7 +366,7 @@ test("successful update reloads fixed asset URLs and leaves only a transient mar
       return {
         ok: true,
         status: 200,
-        json: async () => ({ status: "success", data: { short: "onani", version: "0.1.7" } }),
+        json: async () => ({ status: "success", data: { short: "onani", version: "0.1.8" } }),
       };
     }
     if (path.endsWith("/index.css") || path.endsWith("/index.js")) {
@@ -312,15 +377,18 @@ test("successful update reloads fixed asset URLs and leaves only a transient mar
   };
 
   vm.runInContext(`
-    currentVersion = "0.1.6";
+    currentVersion = "0.1.7";
     updateMode = "available";
-    availableUpdate = { sourceId: "onani-source", version: "0.1.7" };
+    availableUpdate = { sourceId: "onani-source", version: "0.1.8" };
     renderUpdater();
   `, context);
-  await vm.runInContext("installAvailableUpdate()", context);
+  const install = vm.runInContext("installAvailableUpdate()", context) as Promise<void>;
+  assert.equal(elements.get("confirm-dialog")!.open, true);
+  elements.get("confirm-accept")!.dispatch("click");
+  await install;
 
   assert.equal(browser.reloads, 1);
-  assert.equal(browser.session.get("onani:updated-version"), "0.1.7");
+  assert.equal(browser.session.get("onani:updated-version"), "0.1.8");
   assert.deepEqual(assetRequests.map((request) => request.cache), ["reload", "reload"]);
   assert.deepEqual(assetRequests.map((request) => new URL(request.path).pathname).sort(), [
     "/api/admin/plugin/onani/pages/index.css",

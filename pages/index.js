@@ -3,7 +3,7 @@
 const STATUS_RPC = "plugin:onani.hostname.status";
 const REFRESH_RPC = "plugin:onani.hostname.refresh";
 const PLUGIN_SHORT = "onani";
-const CURRENT_VERSION = "0.1.6";
+const CURRENT_VERSION = "0.1.7";
 const UPDATE_SOURCE_NAME = "Onani Updates";
 const UPDATE_SOURCE_URL = "https://github.com/XMZO/komari-plugin-onani/releases/latest/download/onani-update.json";
 const PLUGIN_MARKET_API = "/api/admin/plugin/market";
@@ -19,6 +19,11 @@ const elements = {
   updateCurrent: document.getElementById("update-current"),
   updateStatus: document.getElementById("update-status"),
   updateAction: document.getElementById("update-action"),
+  confirmDialog: document.getElementById("confirm-dialog"),
+  confirmTitle: document.getElementById("confirm-title"),
+  confirmMessage: document.getElementById("confirm-message"),
+  confirmCancel: document.getElementById("confirm-cancel"),
+  confirmAccept: document.getElementById("confirm-accept"),
   nodeCount: document.getElementById("node-count"),
   cachedCount: document.getElementById("cached-count"),
   onlineCount: document.getElementById("online-count"),
@@ -51,6 +56,7 @@ let updateMode = "idle";
 let updateMessage = "仅在点击时检查 GitHub Release";
 let currentVersion = CURRENT_VERSION;
 let availableUpdate = null;
+let pendingConfirmation = null;
 const localPendingUuids = new Set();
 const renderedRows = new Map();
 const renderedRowFingerprints = new Map();
@@ -151,6 +157,38 @@ function hideNotice(element) {
   noticeHideTimers.set(element, hideTimer);
 }
 
+function settleConfirmation(approved) {
+  const resolve = pendingConfirmation;
+  if (!resolve) return;
+  pendingConfirmation = null;
+  if (typeof elements.confirmDialog.close === "function" && elements.confirmDialog.open) {
+    elements.confirmDialog.close();
+  } else {
+    elements.confirmDialog.removeAttribute("open");
+  }
+  resolve(approved);
+}
+
+function requestConfirmation({ title, message, confirmLabel = "继续" }) {
+  if (pendingConfirmation) return Promise.resolve(false);
+  elements.confirmTitle.textContent = title;
+  elements.confirmMessage.textContent = message;
+  elements.confirmAccept.textContent = confirmLabel;
+
+  return new Promise((resolve) => {
+    pendingConfirmation = resolve;
+    try {
+      if (typeof elements.confirmDialog.showModal === "function") elements.confirmDialog.showModal();
+      else elements.confirmDialog.setAttribute("open", "");
+      elements.confirmCancel.focus();
+    } catch {
+      pendingConfirmation = null;
+      showNotice(elements.error, "无法打开确认窗口，请刷新页面后重试");
+      resolve(false);
+    }
+  });
+}
+
 function parseSemver(value) {
   if (typeof value !== "string") return null;
   const match = /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(value.trim());
@@ -241,7 +279,11 @@ async function ensureUpdateSource() {
   if (source && source.enabled === true) return source;
 
   if (source) {
-    const approved = window.confirm("Onani 更新源目前已禁用。是否重新启用它并检查 GitHub Release？");
+    const approved = await requestConfirmation({
+      title: "重新启用更新源",
+      message: "Onani 更新源已被停用。重新启用后才可继续检查 GitHub Release。",
+      confirmLabel: "启用并检查",
+    });
     if (!approved) return null;
     return adminRequest(`${PLUGIN_MARKET_API}/sources/${encodeURIComponent(source.id)}`, {
       method: "PUT",
@@ -343,9 +385,11 @@ async function refreshUpdatedAssets() {
 async function installAvailableUpdate() {
   if (updateBusy || !availableUpdate) return;
   const target = availableUpdate;
-  const approved = window.confirm(
-    `将由 Komari 从 GitHub Release 把 Onani v${currentVersion} 更新到 v${target.version}。旧代码目录会被替换，插件配置和主机名缓存会保留。是否继续？`,
-  );
+  const approved = await requestConfirmation({
+    title: `更新到 v${target.version}`,
+    message: `Komari 将从 GitHub Release 更新 Onani（当前 v${currentVersion}）。插件配置和主机名缓存会保留。`,
+    confirmLabel: "开始更新",
+  });
   if (!approved) return;
 
   updateBusy = true;
@@ -798,10 +842,23 @@ elements.clearFilters.addEventListener("click", clearFilters);
 elements.emptyClear.addEventListener("click", clearFilters);
 elements.updateAction.addEventListener("click", () => void handleUpdateAction());
 elements.refreshDue.addEventListener("click", () => void startRefresh({ force: false }));
-elements.forceAll.addEventListener("click", () => {
-  if (window.confirm("强制刷新会对全部在线节点各执行一次固定命令 hostname，是否继续？")) {
-    void startRefresh({ force: true });
-  }
+elements.forceAll.addEventListener("click", async () => {
+  const approved = await requestConfirmation({
+    title: "强制刷新全部在线节点",
+    message: "将对每个在线节点执行一次固定命令 hostname。正在运行或排队的节点不会重复加入。",
+    confirmLabel: "开始刷新",
+  });
+  if (approved) void startRefresh({ force: true });
+});
+elements.confirmCancel.addEventListener("click", () => settleConfirmation(false));
+elements.confirmAccept.addEventListener("click", () => settleConfirmation(true));
+elements.confirmDialog.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  settleConfirmation(false);
+});
+elements.confirmDialog.addEventListener("close", () => settleConfirmation(false));
+elements.confirmDialog.addEventListener("click", (event) => {
+  if (event.target === elements.confirmDialog) settleConfirmation(false);
 });
 
 document.addEventListener("visibilitychange", () => {
