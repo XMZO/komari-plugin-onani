@@ -39,3 +39,4 @@ jobs:
               --verify-tag \
               --title "Onani Toolbox $TAG" \
               --generate-notes
+          fi
