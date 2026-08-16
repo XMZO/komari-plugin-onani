@@ -9,7 +9,7 @@
     "zh-CN": "轻量、安全、可扩展的 Komari 工具箱；当前提供节点主机名采集与缓存。",
     "en": "A small, security-focused and extensible Komari toolbox. Currently provides cached node hostname discovery."
   },
-  "version": "0.1.7",
+  "version": "0.1.8",
   "entry": "script.js",
   "author": "XMZO",
   "url": "https://github.com/XMZO/komari-plugin-onani",

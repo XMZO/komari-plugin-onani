@@ -221,6 +221,8 @@ test("admin page keeps every script binding present and avoids unsafe HTML sinks
   assert.match(styles, /@keyframes\s+notice-leave/);
   assert.match(styles, /@keyframes\s+row-updated/);
   assert.match(styles, /@keyframes\s+busy-spin/);
+  assert.match(styles, /@keyframes\s+confirm-exit/);
+  assert.match(styles, /@keyframes\s+content-updated/);
   assert.match(styles, /@media\s*\(prefers-reduced-motion:\s*reduce\)/);
 });
 
@@ -248,18 +250,20 @@ test("confirmations stay inside the page and resolve only from dialog actions", 
   const dialog = elements.get("confirm-dialog")!;
 
   const cancelled = vm.runInContext(`requestConfirmation({
-    title: "更新到 v0.1.8",
+    title: "更新到 v0.1.9",
     message: "测试确认内容",
     confirmLabel: "开始更新",
   })`, context) as Promise<boolean>;
   assert.equal(dialog.open, true);
-  assert.equal(elements.get("confirm-title")!.textContent, "更新到 v0.1.8");
+  assert.equal(elements.get("confirm-title")!.textContent, "更新到 v0.1.9");
   assert.equal(elements.get("confirm-message")!.textContent, "测试确认内容");
   assert.equal(elements.get("confirm-accept")!.textContent, "开始更新");
   assert.equal(elements.get("confirm-cancel")!.focused, true);
   elements.get("confirm-cancel")!.dispatch("click");
+  assert.match(dialog.className, /\bclosing\b/);
   assert.equal(await cancelled, false);
   assert.equal(dialog.open, false);
+  assert.doesNotMatch(dialog.className, /\bclosing\b/);
 
   const accepted = vm.runInContext(`requestConfirmation({
     title: "强制刷新全部在线节点",
@@ -317,7 +321,7 @@ test("update check selects only the private source and compares the installed ve
       return {
         ok: true,
         status: 200,
-        json: async () => ({ jsonrpc: "2.0", result: [{ short: "onani", version: "0.1.7" }] }),
+        json: async () => ({ jsonrpc: "2.0", result: [{ short: "onani", version: "0.1.8" }] }),
       };
     }
     if (path.endsWith("/sources")) {
@@ -333,7 +337,7 @@ test("update check selects only the private source and compares the installed ve
             sources: [{ id: "official", error: "ignored" }, { id: source.id, count: 1 }],
             plugins: [
               { short: "onani", version: "9.9.9", source_id: "official", installable: true },
-              { short: "onani", version: "0.1.8", source_id: source.id, installable: true },
+              { short: "onani", version: "0.1.9", source_id: source.id, installable: true },
             ],
           },
         }),
@@ -346,10 +350,10 @@ test("update check selects only the private source and compares the installed ve
   const state = JSON.parse(vm.runInContext("JSON.stringify({ updateMode, currentVersion, availableUpdate })", context) as string);
   assert.deepEqual(state, {
     updateMode: "available",
-    currentVersion: "0.1.7",
-    availableUpdate: { sourceId: "onani-source", version: "0.1.8" },
+    currentVersion: "0.1.8",
+    availableUpdate: { sourceId: "onani-source", version: "0.1.9" },
   });
-  assert.equal(elements.get("update-action")!.textContent, "更新到 v0.1.8");
+  assert.equal(elements.get("update-action")!.textContent, "更新到 v0.1.9");
 });
 
 test("successful update reloads fixed asset URLs and leaves only a transient marker", async () => {
@@ -366,7 +370,7 @@ test("successful update reloads fixed asset URLs and leaves only a transient mar
       return {
         ok: true,
         status: 200,
-        json: async () => ({ status: "success", data: { short: "onani", version: "0.1.8" } }),
+        json: async () => ({ status: "success", data: { short: "onani", version: "0.1.9" } }),
       };
     }
     if (path.endsWith("/index.css") || path.endsWith("/index.js")) {
@@ -377,9 +381,9 @@ test("successful update reloads fixed asset URLs and leaves only a transient mar
   };
 
   vm.runInContext(`
-    currentVersion = "0.1.7";
+    currentVersion = "0.1.8";
     updateMode = "available";
-    availableUpdate = { sourceId: "onani-source", version: "0.1.8" };
+    availableUpdate = { sourceId: "onani-source", version: "0.1.9" };
     renderUpdater();
   `, context);
   const install = vm.runInContext("installAvailableUpdate()", context) as Promise<void>;
@@ -388,7 +392,7 @@ test("successful update reloads fixed asset URLs and leaves only a transient mar
   await install;
 
   assert.equal(browser.reloads, 1);
-  assert.equal(browser.session.get("onani:updated-version"), "0.1.8");
+  assert.equal(browser.session.get("onani:updated-version"), "0.1.9");
   assert.deepEqual(assetRequests.map((request) => request.cache), ["reload", "reload"]);
   assert.deepEqual(assetRequests.map((request) => new URL(request.path).pathname).sort(), [
     "/api/admin/plugin/onani/pages/index.css",

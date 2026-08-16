@@ -52,16 +52,18 @@ code {
   border-radius: 12px;
   background: light-dark(#fff, #181e28);
   box-shadow: 0 8px 28px rgb(16 24 40 / 5%);
-  transition: border-color 160ms ease, background-color 160ms ease;
+  transition: border-color 180ms ease, background-color 180ms ease, box-shadow 180ms ease;
 }
 
 .update-card.available {
   border-color: light-dark(#9ca8ff, #5968bd);
   background: light-dark(#f8f9ff, #1b2135);
+  box-shadow: 0 10px 30px rgb(91 108 255 / 12%);
 }
 
 .update-card.error {
   border-color: light-dark(#efc1be, #704147);
+  box-shadow: 0 10px 30px rgb(190 67 67 / 10%);
 }
 
 .update-copy {
@@ -76,6 +78,7 @@ code {
 }
 
 .update-version strong {
+  display: inline-block;
   margin-left: 4px;
   color: light-dark(#344054, #e0e5ef);
   font-size: 13px;
@@ -185,11 +188,12 @@ code {
   color: inherit;
   background: light-dark(#fff, #1b212c);
   cursor: pointer;
-  transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease, transform 120ms ease;
+  transition: border-color 150ms ease, background-color 150ms ease, color 150ms ease, box-shadow 150ms ease, transform 140ms ease;
 }
 
 .button:hover:not(:disabled) {
   border-color: #7180ff;
+  box-shadow: 0 5px 14px rgb(54 67 160 / 14%);
   transform: translateY(-1px);
 }
 
@@ -270,6 +274,15 @@ select:focus-visible {
   animation: backdrop-enter 160ms ease-out;
 }
 
+.confirm-dialog.closing {
+  pointer-events: none;
+  animation: confirm-exit 140ms ease-in forwards;
+}
+
+.confirm-dialog.closing::backdrop {
+  animation: backdrop-exit 140ms ease-in forwards;
+}
+
 .confirm-dialog-content {
   padding: 23px;
 }
@@ -301,6 +314,14 @@ select:focus-visible {
 
 .confirm-dialog-actions .button {
   min-width: 82px;
+}
+
+.update-version strong.content-updated,
+.update-status.content-updated,
+.summary strong.content-updated,
+.tab-count.content-updated,
+.result-count.content-updated {
+  animation: content-updated 190ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 .notice {
@@ -369,6 +390,7 @@ select:focus-visible {
 }
 
 .summary strong {
+  display: inline-block;
   font-size: 24px;
 }
 
@@ -629,6 +651,40 @@ footer {
   }
 }
 
+@keyframes confirm-exit {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+
+  to {
+    opacity: 0;
+    transform: translateY(7px) scale(0.985);
+  }
+}
+
+@keyframes backdrop-exit {
+  from {
+    opacity: 1;
+  }
+
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes content-updated {
+  from {
+    opacity: 0.45;
+    transform: translateY(3px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .button,
   .update-card,
@@ -642,6 +698,9 @@ footer {
   .feedback .notice.leaving,
   .confirm-dialog[open],
   .confirm-dialog::backdrop,
+  .confirm-dialog.closing,
+  .confirm-dialog.closing::backdrop,
+  .content-updated,
   tbody tr.row-updated,
   .button.busy::before {
     animation: none;

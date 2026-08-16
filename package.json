@@ -1,6 +1,6 @@
 {
   "name": "komari-plugin-onani",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "private": true,
   "description": "A small, security-focused Komari toolbox plugin.",
   "packageManager": "pnpm@10.30.3",

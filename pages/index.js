@@ -3,13 +3,14 @@
 const STATUS_RPC = "plugin:onani.hostname.status";
 const REFRESH_RPC = "plugin:onani.hostname.refresh";
 const PLUGIN_SHORT = "onani";
-const CURRENT_VERSION = "0.1.7";
+const CURRENT_VERSION = "0.1.8";
 const UPDATE_SOURCE_NAME = "Onani Updates";
 const UPDATE_SOURCE_URL = "https://github.com/XMZO/komari-plugin-onani/releases/latest/download/onani-update.json";
 const PLUGIN_MARKET_API = "/api/admin/plugin/market";
 const UPDATE_CHECK_TIMEOUT_MS = 20_000;
 const UPDATE_INSTALL_TIMEOUT_MS = 60_000;
 const UPDATE_RELOAD_MARKER = "onani:updated-version";
+const CONFIRM_CLOSE_DURATION_MS = 140;
 
 const elements = {
   error: document.getElementById("error"),
@@ -143,12 +144,27 @@ function showNotice(element, message) {
   element.hidden = false;
 }
 
+function prefersReducedMotion() {
+  return typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+function replayMotion(element, className) {
+  if (prefersReducedMotion()) return;
+  element.classList.remove(className);
+  void element.offsetWidth;
+  element.classList.add(className);
+}
+
+function setAnimatedText(element, value) {
+  if (element.textContent === value) return;
+  element.textContent = value;
+  replayMotion(element, "content-updated");
+}
+
 function hideNotice(element) {
   if (element.hidden || noticeHideTimers.has(element)) return;
   element.classList.add("leaving");
-  const delay = typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches
-    ? 0
-    : 160;
+  const delay = prefersReducedMotion() ? 0 : 160;
   const hideTimer = setTimeout(() => {
     element.hidden = true;
     element.classList.remove("leaving");
@@ -158,15 +174,28 @@ function hideNotice(element) {
 }
 
 function settleConfirmation(approved) {
-  const resolve = pendingConfirmation;
-  if (!resolve) return;
-  pendingConfirmation = null;
-  if (typeof elements.confirmDialog.close === "function" && elements.confirmDialog.open) {
-    elements.confirmDialog.close();
+  const pending = pendingConfirmation;
+  if (!pending || pending.settling) return;
+  pending.settling = true;
+
+  const finish = () => {
+    if (pendingConfirmation !== pending) return;
+    pendingConfirmation = null;
+    elements.confirmDialog.classList.remove("closing");
+    if (typeof elements.confirmDialog.close === "function" && elements.confirmDialog.open) {
+      elements.confirmDialog.close();
+    } else {
+      elements.confirmDialog.removeAttribute("open");
+    }
+    pending.resolve(approved);
+  };
+
+  if (elements.confirmDialog.open && !prefersReducedMotion()) {
+    elements.confirmDialog.classList.add("closing");
+    setTimeout(finish, CONFIRM_CLOSE_DURATION_MS);
   } else {
-    elements.confirmDialog.removeAttribute("open");
+    finish();
   }
-  resolve(approved);
 }
 
 function requestConfirmation({ title, message, confirmLabel = "继续" }) {
@@ -176,13 +205,15 @@ function requestConfirmation({ title, message, confirmLabel = "继续" }) {
   elements.confirmAccept.textContent = confirmLabel;
 
   return new Promise((resolve) => {
-    pendingConfirmation = resolve;
+    const pending = { resolve, settling: false };
+    pendingConfirmation = pending;
     try {
+      elements.confirmDialog.classList.remove("closing");
       if (typeof elements.confirmDialog.showModal === "function") elements.confirmDialog.showModal();
       else elements.confirmDialog.setAttribute("open", "");
       elements.confirmCancel.focus();
     } catch {
-      pendingConfirmation = null;
+      if (pendingConfirmation === pending) pendingConfirmation = null;
       showNotice(elements.error, "无法打开确认窗口，请刷新页面后重试");
       resolve(false);
     }
@@ -227,8 +258,8 @@ function compareSemver(leftValue, rightValue) {
 }
 
 function renderUpdater() {
-  elements.updateCurrent.textContent = `v${currentVersion}`;
-  elements.updateStatus.textContent = updateMessage;
+  setAnimatedText(elements.updateCurrent, `v${currentVersion}`);
+  setAnimatedText(elements.updateStatus, updateMessage);
   elements.updateStatus.title = updateMessage;
   elements.updateCard.classList.remove("available", "error");
   elements.updateAction.className = "button small update-action";
@@ -725,14 +756,14 @@ function renderCurrentView() {
   const queuedUuids = normalizedStringSet(refresh.queued_uuids);
   const bulkRunning = refresh.bulk_running === true || localBulkPending;
 
-  elements.nodeCount.textContent = String(rows.length);
-  elements.cachedCount.textContent = String(cachedCount);
-  elements.onlineCount.textContent = String(onlineCount);
-  elements.cacheDays.textContent = `${cacheDays} 天`;
-  elements.hostnameTabCount.textContent = String(rows.length);
-  elements.resultCount.textContent = visibleRows.length === rows.length
+  setAnimatedText(elements.nodeCount, String(rows.length));
+  setAnimatedText(elements.cachedCount, String(cachedCount));
+  setAnimatedText(elements.onlineCount, String(onlineCount));
+  setAnimatedText(elements.cacheDays, `${cacheDays} 天`);
+  setAnimatedText(elements.hostnameTabCount, String(rows.length));
+  setAnimatedText(elements.resultCount, visibleRows.length === rows.length
     ? `${rows.length} 个节点`
-    : `显示 ${visibleRows.length} / ${rows.length}`;
+    : `显示 ${visibleRows.length} / ${rows.length}`);
   elements.clearFilters.hidden = !hasFilters;
   elements.refreshDue.disabled = bulkRunning || onlineCount === 0;
   elements.forceAll.disabled = bulkRunning || onlineCount === 0;
