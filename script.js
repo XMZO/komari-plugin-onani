@@ -1231,6 +1231,93 @@
     return `${BACKGROUND_PATH}/${id}/original`;
   }
 
+  // src/features/background/pool.ts
+  var BackgroundPool = class {
+    constructor(deps) {
+      this.deps = deps;
+      this.key = "";
+      this.ids = [];
+      this.lastId = "";
+      this.pending = null;
+      this.nextRefreshAt = 0;
+      this.now = deps.now ?? Date.now;
+    }
+    activate(config) {
+      const key = JSON.stringify(config);
+      if (key === this.key) return;
+      this.key = key;
+      this.ids = [];
+      this.lastId = "";
+      this.nextRefreshAt = 0;
+      try {
+        const saved = this.deps.load();
+        if (saved?.key === key && Array.isArray(saved.ids)) {
+          this.ids = [...new Set(saved.ids.filter((id) => typeof id === "string" && /^[a-f0-9]{64}$/.test(id)))].slice(-8);
+        }
+      } catch (error) {
+        this.deps.error(error);
+      }
+    }
+    ready() {
+      const result = [];
+      this.ids = this.ids.filter((id) => {
+        const image = this.deps.read(id);
+        if (!image || image.expiresAt <= this.now() + 6e4) return false;
+        result.push(image);
+        return true;
+      });
+      return result;
+    }
+    async get(config) {
+      this.activate(config);
+      const ready = this.ready();
+      if (ready.length > 0) {
+        const candidates = ready.length > 1 ? ready.filter((image3) => image3.id !== this.lastId) : ready;
+        const image2 = candidates[Math.floor(Math.random() * candidates.length)];
+        this.lastId = image2.id;
+        void this.refresh(config).catch(this.deps.error);
+        return image2;
+      }
+      const image = await this.refresh(config, true);
+      if (!image) throw new Error("\u80CC\u666F\u6B63\u5728\u51C6\u5907\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5");
+      this.lastId = image.id;
+      return image;
+    }
+    async warm(config) {
+      if (!config.enabled) return;
+      this.activate(config);
+      for (let attempt = 0; attempt < 3 && this.ready().length < 3; attempt++) {
+        if (this.key !== JSON.stringify(config)) return;
+        await this.refresh(config, true);
+      }
+    }
+    async refresh(config, force = false) {
+      const key = JSON.stringify(config);
+      if (this.pending) {
+        if (this.pending.key === key) return this.pending.promise;
+        await this.pending.promise.catch(() => null);
+        if (this.key !== key) return null;
+        return this.refresh(config, force);
+      }
+      if (this.key !== key || !force && this.now() < this.nextRefreshAt) return null;
+      this.nextRefreshAt = this.now() + 3e4;
+      const promise = this.deps.create(config).then((raw) => {
+        const image = parseMetadata(raw);
+        if (this.key !== key) return null;
+        this.ids = [...this.ids.filter((id) => id !== image.id), image.id].slice(-8);
+        this.deps.save({ key, ids: this.ids });
+        return image;
+      }).finally(() => {
+        this.pending = null;
+      });
+      this.pending = { key, promise };
+      return promise;
+    }
+    get running() {
+      return this.pending !== null;
+    }
+  };
+
   // src/features/background/index.ts
   var fs2 = __require("fs");
   var path2 = __require("path");
@@ -1240,18 +1327,41 @@
   var BackgroundFeature = class {
     constructor() {
       this.cacheRoot = path2.join(__storageDir__, "background-cache");
-      this.pending = null;
-      this.nextJobAt = 0;
+      this.pool = new BackgroundPool({
+        create: (config) => this.runHelper(config).then((image) => {
+          this.latest = image;
+          this.lastError = null;
+          return image;
+        }),
+        read: (id) => this.readImage(id),
+        load: () => {
+          try {
+            return JSON.parse(fs2.readFileSync(path2.join(this.cacheRoot, "pool.json"), "utf8"));
+          } catch {
+            return null;
+          }
+        },
+        save: (value) => {
+          fs2.writeFileSync(path2.join(this.cacheRoot, "pool.json"), JSON.stringify(value), { mode: 384 });
+        },
+        error: (error) => this.recordError(error)
+      });
       this.lastError = null;
       this.latest = null;
     }
     load() {
-      import_plugin_sdk2.server.route("GET", BACKGROUND_PATH, (req, res) => this.handle(req, res, false));
-      import_plugin_sdk2.server.route("GET", `${BACKGROUND_PATH}/:id/original`, (req, res) => this.handle(req, res, true));
+      import_plugin_sdk2.server.route("GET", BACKGROUND_PATH, (req, res) => this.handle(req, res, "random"));
+      import_plugin_sdk2.server.route("GET", `${BACKGROUND_PATH}/selection`, (req, res) => this.handle(req, res, "selection"));
+      import_plugin_sdk2.server.route("GET", `${BACKGROUND_PATH}/:id/preview`, (req, res) => this.handle(req, res, "preview"));
+      import_plugin_sdk2.server.route("GET", `${BACKGROUND_PATH}/:id/original`, (req, res) => this.handle(req, res, "original"));
+      import_plugin_sdk2.server.route("HEAD", `${BACKGROUND_PATH}/:id/original`, (req, res) => this.handle(req, res, "original"));
+      setTimeout(() => {
+        void this.config().then((config) => this.pool.warm(config)).catch((error) => this.recordError(error));
+      }, 1e3);
       import_plugin_sdk2.server.registerRPC("plugin:onani.background.status", async () => ({
         config: await this.config(),
         endpoint: BACKGROUND_PATH,
-        running: Boolean(this.pending),
+        running: this.pool.running,
         last_error: this.lastError,
         latest: this.latest
       }));
@@ -1261,27 +1371,18 @@
       if (raw.background_enabled !== true) return resolveBackgroundConfig({});
       return resolveBackgroundConfig(raw);
     }
-    prepare(config) {
-      const key = JSON.stringify(config);
-      if (this.pending) {
-        if (this.pending.key !== key) throw new Error("\u80CC\u666F\u914D\u7F6E\u5DF2\u66F4\u65B0\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5");
-        return this.pending.promise;
+    recordError(error) {
+      this.lastError = error instanceof Error ? error.message : String(error);
+      console.error(`[onani] background job failed: ${this.lastError}`);
+    }
+    readImage(id) {
+      try {
+        const image = parseMetadata(JSON.parse(fs2.readFileSync(path2.join(this.cacheRoot, id, "meta.json"), "utf8")));
+        if (image.id !== id || image.expiresAt <= Date.now() || !fs2.existsSync(path2.join(this.cacheRoot, id, "preview")) || !fs2.existsSync(path2.join(this.cacheRoot, id, "original"))) return null;
+        return image;
+      } catch {
+        return null;
       }
-      if (Date.now() < this.nextJobAt) throw new Error("\u80CC\u666F\u8BF7\u6C42\u9891\u7E41\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5");
-      this.nextJobAt = Date.now() + 2e3;
-      const promise = this.runHelper(config).then((metadata) => {
-        this.latest = metadata;
-        this.lastError = null;
-        return metadata;
-      }).catch((error) => {
-        this.lastError = error instanceof Error ? error.message : String(error);
-        console.error(`[onani] background job failed: ${this.lastError}`);
-        throw error;
-      }).finally(() => {
-        this.pending = null;
-      });
-      this.pending = { key, promise };
-      return promise;
     }
     runHelper(config) {
       const os = runtimeProcess.platform === "win32" ? "windows" : runtimeProcess.platform;
@@ -1307,7 +1408,7 @@
         });
       });
     }
-    async handle(req, res, download) {
+    async handle(req, res, kind) {
       res.setHeader("Cache-Control", "private, no-store, max-age=0");
       res.setHeader("X-Content-Type-Options", "nosniff");
       try {
@@ -1316,9 +1417,10 @@
           this.error(res, 404, "\u80CC\u666F\u4EE3\u7406\u672A\u542F\u7528");
           return;
         }
+        const download = kind === "original";
         let metadata;
-        if (download) {
-          const id = parseOriginalPath(req.url);
+        if (download || kind === "preview") {
+          const id = download ? parseOriginalPath(req.url) : /^\/api\/plugins\/onani\/background\/([a-f0-9]{64})\/preview(?:\?.*)?$/.exec(req.url)?.[1];
           if (!id) {
             this.error(res, 404, "\u56FE\u7247\u4E0D\u5B58\u5728");
             return;
@@ -1334,19 +1436,39 @@
             return;
           }
         } else {
-          metadata = await this.prepare(config);
+          metadata = await this.pool.get(config);
           if (!(await this.config()).enabled) {
             this.error(res, 404, "\u80CC\u666F\u4EE3\u7406\u672A\u542F\u7528");
             return;
           }
         }
         if (res.isAborted()) return;
+        if (kind === "selection") {
+          res.setHeader("Content-Type", "application/json; charset=utf-8");
+          res.end(JSON.stringify({ preview: `${BACKGROUND_PATH}/${metadata.id}/preview`, original: originalPath(metadata.id), expiresAt: metadata.expiresAt }));
+          return;
+        }
+        if (req.method === "HEAD") {
+          if (!fs2.existsSync(path2.join(this.cacheRoot, metadata.id, "original"))) {
+            this.error(res, 410, "\u5F53\u524D\u80CC\u666F\u7F13\u5B58\u5DF2\u8FC7\u671F\uFF0C\u8BF7\u5237\u65B0\u9875\u9762\u91CD\u65B0\u52A0\u8F7D\u80CC\u666F");
+            return;
+          }
+          res.setHeader("Content-Type", metadata.originalMime);
+          res.setHeader("Content-Length", String(metadata.originalBytes));
+          res.statusCode = 200;
+          res.end();
+          return;
+        }
         let data;
         try {
           data = fs2.readFileSync(path2.join(this.cacheRoot, metadata.id, download ? "original" : "preview"));
         } catch {
           this.error(res, 410, "\u5F53\u524D\u80CC\u666F\u7F13\u5B58\u5DF2\u8FC7\u671F\uFF0C\u8BF7\u5237\u65B0\u9875\u9762\u91CD\u65B0\u52A0\u8F7D\u80CC\u666F");
           return;
+        }
+        if (download || kind === "preview") {
+          const ttl = Math.max(0, Math.min(300, Math.floor((metadata.expiresAt - Date.now()) / 1e3)));
+          res.setHeader("Cache-Control", `public, max-age=${ttl}, immutable`);
         }
         res.setHeader("Content-Type", download ? metadata.originalMime : metadata.previewMime);
         res.setHeader("Content-Length", String(data.length));

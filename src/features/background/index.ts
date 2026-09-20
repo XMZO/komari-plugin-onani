@@ -1,4 +1,5 @@
 import { server, type PluginRequest, type PluginResponse } from "@komari-monitor/plugin-sdk";
+import { BackgroundPool } from "./pool";
 import { withTimeout } from "../../shared/async-timeout";
 import { BACKGROUND_PATH, originalPath, parseMetadata, parseOriginalPath, resolveBackgroundConfig, type BackgroundConfig, type ImageMetadata } from "./core";
 
@@ -10,16 +11,25 @@ const JOB_TIMEOUT = 30_000;
 
 class BackgroundFeature {
   private readonly cacheRoot = path.join(__storageDir__, "background-cache");
-  private pending: { key: string; promise: Promise<ImageMetadata> } | null = null;
-  private nextJobAt = 0;
+  private readonly pool = new BackgroundPool({
+    create: (config) => this.runHelper(config).then((image) => { this.latest = image; this.lastError = null; return image; }),
+    read: (id) => this.readImage(id),
+    load: () => { try { return JSON.parse(fs.readFileSync(path.join(this.cacheRoot, "pool.json"), "utf8")); } catch { return null; } },
+    save: (value) => { fs.writeFileSync(path.join(this.cacheRoot, "pool.json"), JSON.stringify(value), { mode: 0o600 }); },
+    error: (error) => this.recordError(error),
+  });
   private lastError: string | null = null;
   private latest: ImageMetadata | null = null;
 
   load(): void {
-    server.route("GET", BACKGROUND_PATH, (req, res) => this.handle(req, res, false));
-    server.route("GET", `${BACKGROUND_PATH}/:id/original`, (req, res) => this.handle(req, res, true));
+    server.route("GET", BACKGROUND_PATH, (req, res) => this.handle(req, res, "random"));
+    server.route("GET", `${BACKGROUND_PATH}/selection`, (req, res) => this.handle(req, res, "selection"));
+    server.route("GET", `${BACKGROUND_PATH}/:id/preview`, (req, res) => this.handle(req, res, "preview"));
+    server.route("GET", `${BACKGROUND_PATH}/:id/original`, (req, res) => this.handle(req, res, "original"));
+    server.route("HEAD", `${BACKGROUND_PATH}/:id/original`, (req, res) => this.handle(req, res, "original"));
+    setTimeout(() => { void this.config().then((config) => this.pool.warm(config)).catch((error) => this.recordError(error)); }, 1000);
     server.registerRPC("plugin:onani.background.status", async () => ({
-      config: await this.config(), endpoint: BACKGROUND_PATH, running: Boolean(this.pending),
+      config: await this.config(), endpoint: BACKGROUND_PATH, running: this.pool.running,
       last_error: this.lastError, latest: this.latest,
     }));
   }
@@ -31,25 +41,18 @@ class BackgroundFeature {
     return resolveBackgroundConfig(raw);
   }
 
-  private prepare(config: BackgroundConfig): Promise<ImageMetadata> {
-    const key = JSON.stringify(config);
-    if (this.pending) {
-      if (this.pending.key !== key) throw new Error("背景配置已更新，请稍后重试");
-      return this.pending.promise;
-    }
-    if (Date.now() < this.nextJobAt) throw new Error("背景请求频繁，请稍后重试");
-    this.nextJobAt = Date.now() + 2_000;
-    const promise = this.runHelper(config).then((metadata) => {
-      this.latest = metadata;
-      this.lastError = null;
-      return metadata;
-    }).catch((error: unknown) => {
-      this.lastError = error instanceof Error ? error.message : String(error);
-      console.error(`[onani] background job failed: ${this.lastError}`);
-      throw error;
-    }).finally(() => { this.pending = null; });
-    this.pending = { key, promise };
-    return promise;
+  private recordError(error: unknown): void {
+    this.lastError = error instanceof Error ? error.message : String(error);
+    console.error(`[onani] background job failed: ${this.lastError}`);
+  }
+
+  private readImage(id: string): ImageMetadata | null {
+    try {
+      const image = parseMetadata(JSON.parse(fs.readFileSync(path.join(this.cacheRoot, id, "meta.json"), "utf8")));
+      if (image.id !== id || image.expiresAt <= Date.now()
+        || !fs.existsSync(path.join(this.cacheRoot, id, "preview")) || !fs.existsSync(path.join(this.cacheRoot, id, "original"))) return null;
+      return image;
+    } catch { return null; }
   }
 
   private runHelper(config: BackgroundConfig): Promise<ImageMetadata> {
@@ -70,28 +73,46 @@ class BackgroundFeature {
     });
   }
 
-  private async handle(req: PluginRequest, res: PluginResponse, download: boolean): Promise<void> {
+  private async handle(req: PluginRequest, res: PluginResponse, kind: "random" | "selection" | "preview" | "original"): Promise<void> {
     res.setHeader("Cache-Control", "private, no-store, max-age=0");
     res.setHeader("X-Content-Type-Options", "nosniff");
     try {
       const config = await this.config();
       if (!config.enabled) { this.error(res, 404, "背景代理未启用"); return; }
+      const download = kind === "original";
       let metadata: ImageMetadata;
-      if (download) {
-        const id = parseOriginalPath(req.url);
+      if (download || kind === "preview") {
+        const id = download ? parseOriginalPath(req.url) : /^\/api\/plugins\/onani\/background\/([a-f0-9]{64})\/preview(?:\?.*)?$/.exec(req.url)?.[1];
         if (!id) { this.error(res, 404, "图片不存在"); return; }
         try { metadata = parseMetadata(JSON.parse(fs.readFileSync(path.join(this.cacheRoot, id, "meta.json"), "utf8"))); }
         catch { this.error(res, 410, "当前背景原图已过期，请刷新页面重新加载背景"); return; }
         if (metadata.id !== id || metadata.expiresAt <= Date.now()) { this.error(res, 410, "当前背景原图已过期，请刷新页面重新加载背景"); return; }
       } else {
-        metadata = await this.prepare(config);
+        metadata = await this.pool.get(config);
         // Recheck after the asynchronous job so switching off stops in-flight previews too.
         if (!(await this.config()).enabled) { this.error(res, 404, "背景代理未启用"); return; }
       }
       if (res.isAborted()) return;
+      if (kind === "selection") {
+        res.setHeader("Content-Type", "application/json; charset=utf-8");
+        res.end(JSON.stringify({ preview: `${BACKGROUND_PATH}/${metadata.id}/preview`, original: originalPath(metadata.id), expiresAt: metadata.expiresAt }));
+        return;
+      }
+      if (req.method === "HEAD") {
+        if (!fs.existsSync(path.join(this.cacheRoot, metadata.id, "original"))) { this.error(res, 410, "当前背景缓存已过期，请刷新页面重新加载背景"); return; }
+        res.setHeader("Content-Type", metadata.originalMime);
+        res.setHeader("Content-Length", String(metadata.originalBytes));
+        res.statusCode = 200;
+        res.end();
+        return;
+      }
       let data: Buffer;
       try { data = fs.readFileSync(path.join(this.cacheRoot, metadata.id, download ? "original" : "preview")); }
       catch { this.error(res, 410, "当前背景缓存已过期，请刷新页面重新加载背景"); return; }
+      if (download || kind === "preview") {
+        const ttl = Math.max(0, Math.min(300, Math.floor((metadata.expiresAt - Date.now()) / 1000)));
+        res.setHeader("Cache-Control", `public, max-age=${ttl}, immutable`);
+      }
       res.setHeader("Content-Type", download ? metadata.originalMime : metadata.previewMime);
       res.setHeader("Content-Length", String(data.length));
       if (download) {

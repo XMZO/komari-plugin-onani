@@ -21,7 +21,7 @@
         </div>
         <section id="update-card" class="update-card" aria-label="插件更新">
           <div class="update-copy">
-            <span class="update-version">当前版本 <strong id="update-current">v0.2.1</strong></span>
+            <span class="update-version">当前版本 <strong id="update-current">v0.2.2</strong></span>
             <span id="update-status" class="update-status" role="status" aria-live="polite">仅在点击时检查 GitHub Release</span>
           </div>
           <button id="update-action" class="button small update-action" type="button">检查更新</button>
@@ -140,7 +140,7 @@
           <div class="background-options">
             <label>WebP 压缩质量<input id="background-quality" type="number" min="40" max="90" value="78" required /></label>
           </div>
-          <p class="subtitle">转码失败或体积没有变小时使用原图。动画保持原样；缓存最多保留 24 小时，达到 256 MiB 或 128 张时提前淘汰旧图。</p>
+          <p class="subtitle">转码失败或体积没有变小时使用原图。动画保持原样；背景会提前准备并从缓存选取；首次准备仍需等待。缓存最多保留 24 小时，达到 256 MiB 或 128 张时提前淘汰旧图。</p>
           <div><button id="background-save" class="button primary" type="submit" disabled>保存设置</button></div>
           <p id="background-feedback" role="status" aria-live="polite"></p>
         </form>
@@ -148,7 +148,7 @@
           <h3>接入 Naive 主题</h3>
           <p>在主题设置中将亮色或暗色背景地址改为：</p>
           <code>/api/plugins/onani/background</code>
-          <p class="subtitle">开启 WebP 时请使用 Naive 2.0.38 或更新版本，确保下载按钮保存转换前的原文件。关闭代理后，该背景地址将停止提供图片。</p>
+          <p class="subtitle">开启 WebP 时请使用 Naive 2.0.39 或更新版本，确保下载按钮保存转换前的原文件。关闭代理后，该背景地址将停止提供图片。</p>
           <p id="background-statistics" class="subtitle"></p>
         </section>
       </section>

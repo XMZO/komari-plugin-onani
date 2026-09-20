@@ -3,7 +3,7 @@
 const STATUS_RPC = "plugin:onani.hostname.status";
 const REFRESH_RPC = "plugin:onani.hostname.refresh";
 const PLUGIN_SHORT = "onani";
-const CURRENT_VERSION = "0.2.1";
+const CURRENT_VERSION = "0.2.2";
 const UPDATE_SOURCE_NAME = "Onani Updates";
 const UPDATE_SOURCE_URL = "https://github.com/XMZO/komari-plugin-onani/releases/latest/download/onani-update.json";
 const PLUGIN_MARKET_API = "/api/admin/plugin/market";

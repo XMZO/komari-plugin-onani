@@ -104,6 +104,34 @@ func TestOnaniBackgroundRuntime(t *testing.T) {
 		t.Fatal("download changed on repeat")
 	}
 	t.Logf("real runtime: original=%d preview=%d savings=%.1f%%", original.Body.Len(), preview.Body.Len(), 100*(1-float64(preview.Body.Len())/float64(original.Body.Len())))
+	started := time.Now()
+	selection := request(endpoint + "/selection")
+	if selection.Code != 200 || time.Since(started) > time.Second {
+		t.Fatalf("warm selection should be immediate: %d %s", selection.Code, time.Since(started))
+	}
+	var selected struct {
+		Preview  string `json:"preview"`
+		Original string `json:"original"`
+	}
+	if err := json.Unmarshal(selection.Body.Bytes(), &selected); err != nil {
+		t.Fatal(err)
+	}
+	if selected.Original != originalPath {
+		t.Fatal("selection changed the fixed-source original")
+	}
+	fixed := request(selected.Preview)
+	if fixed.Code != 200 || !bytes.Equal(fixed.Body.Bytes(), preview.Body.Bytes()) {
+		t.Fatal("fixed preview differs")
+	}
+	if !strings.Contains(fixed.Header().Get("Cache-Control"), "public") || !strings.Contains(original.Header().Get("Cache-Control"), "public") {
+		t.Fatal("immutable images are not CDN cacheable")
+	}
+	head := httptest.NewRecorder()
+	engine.ServeHTTP(head, httptest.NewRequest(http.MethodHead, selected.Original, nil))
+	if head.Code != 200 || head.Body.Len() != 0 {
+		t.Fatal("original HEAD should check availability without transferring image")
+	}
+	t.Logf("warm selection + fixed preview + HEAD: %s", time.Since(started))
 	metadataPath := filepath.Join(StorageDir, "onani", "background-cache", id, "meta.json")
 	raw, err := os.ReadFile(metadataPath)
 	if err != nil {

@@ -207,6 +207,18 @@ func storeImage(root string, original []byte, useWebP bool, quality int, now tim
 	fmt.Fprintf(digest, "\x00webp=%t;quality=%d;original-dimensions;v=2", useWebP, quality)
 	m = metadata{ID: hex.EncodeToString(digest.Sum(nil)), OriginalMime: "image/" + format, PreviewMime: "image/" + format,
 		Extension: ext, OriginalBytes: len(original), ExpiresAt: now.Add(cacheLifetime).UnixMilli()}
+	// Repeated source images reuse the prepared bytes before expensive decoding/encoding.
+	dest := filepath.Join(root, m.ID)
+	if existing, err := os.ReadFile(filepath.Join(dest, "meta.json")); err == nil {
+		var previous metadata
+		if json.Unmarshal(existing, &previous) == nil && previous.ExpiresAt > now.UnixMilli() {
+			_, originalErr := os.Stat(filepath.Join(dest, "original"))
+			_, previewErr := os.Stat(filepath.Join(dest, "preview"))
+			if originalErr == nil && previewErr == nil {
+				return previous, nil
+			}
+		}
+	}
 	preview := original
 	// Preserve GIF animation; JPEG EXIF orientation remains correct by avoiding conversion when present.
 	// A failed or larger conversion never damages the original or increases visitor traffic.
@@ -238,7 +250,6 @@ func storeImage(root string, original []byte, useWebP bool, quality int, now tim
 	if err := os.WriteFile(filepath.Join(tmp, "meta.json"), encoded, 0600); err != nil {
 		return m, err
 	}
-	dest := filepath.Join(root, m.ID)
 	// Reuse identical immutable entries. Retain their original expiration time.
 	if existing, err := os.ReadFile(filepath.Join(dest, "meta.json")); err == nil {
 		var previous metadata
