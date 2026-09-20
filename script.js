@@ -439,7 +439,7 @@
   });
 
   // src/plugin.ts
-  var import_plugin_sdk2 = __toESM(require_src());
+  var import_plugin_sdk3 = __toESM(require_src());
 
   // src/features/hostname/index.ts
   var import_plugin_sdk = __toESM(require_src());
@@ -580,6 +580,19 @@
   var RETRY_BACKOFF_MS = 24 * 60 * 60 * 1e3;
   var UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   var FORBIDDEN_HOSTNAME_CHARACTER = /[\s/\\:<>"'`]/u;
+  function normalizeFailure(value) {
+    if (!isRecord(value) || typeof value.stage !== "string" || !validIsoTimestamp(value.at)) return void 0;
+    const failure = { stage: safeErrorText(value.stage), at: value.at };
+    if (typeof value.task_id === "string" && value.task_id.trim()) failure.task_id = safeErrorText(value.task_id).slice(0, 128);
+    if (typeof value.rpc_code === "number" && Number.isSafeInteger(value.rpc_code)) failure.rpc_code = value.rpc_code;
+    if (typeof value.exit_code === "number" && Number.isSafeInteger(value.exit_code)) failure.exit_code = value.exit_code;
+    if (typeof value.output === "string" && value.output.trim()) failure.output = safeResultOutput(value.output);
+    return failure;
+  }
+  function safeResultOutput(value) {
+    if (typeof value !== "string") return "";
+    return value.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "").trim().slice(0, 2048);
+  }
   function asBoolean(value, fallback) {
     return typeof value === "boolean" ? value : fallback;
   }
@@ -628,6 +641,7 @@
     if (validIsoTimestamp(value.last_attempt_at)) entry.last_attempt_at = value.last_attempt_at;
     if (typeof value.last_error === "string" && value.last_error.trim()) {
       entry.last_error = safeErrorText(value.last_error);
+      entry.last_failure = normalizeFailure(value.last_failure);
     }
     return entry;
   }
@@ -687,9 +701,9 @@
     return { ok: true, hostname };
   }
   function safeErrorText(value, fallback = "\u672A\u77E5\u9519\u8BEF") {
-    const text = value instanceof Error ? value.message : typeof value === "string" ? value : fallback;
+    const text = value instanceof Error ? value.message : typeof value === "string" ? value : isRecord(value) && typeof value.message === "string" ? value.message : fallback;
     const compact = text.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
-    return (compact || fallback).slice(0, 180);
+    return (compact || fallback).slice(0, 512);
   }
   function isRecord(value) {
     return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -777,6 +791,7 @@
       this.bulkJobs = 0;
       this.waveMessage = null;
       this.waveError = null;
+      this.waveFailures = /* @__PURE__ */ new Map();
       this.jobs = new BoundedJobQueue(
         MAX_CONCURRENT_REFRESH_JOBS,
         (job) => this.processRefreshJob(job),
@@ -847,6 +862,7 @@
         };
         this.waveMessage = null;
         this.waveError = null;
+        this.waveFailures.clear();
       } else if (request.reason === "manual") {
         this.refresh.reason = "manual";
       }
@@ -858,7 +874,8 @@
         reservedUuids,
         activeUuids: /* @__PURE__ */ new Set(),
         bulk,
-        deadlineAt: Date.now() + REFRESH_JOB_TIMEOUT_MS
+        deadlineAt: Date.now() + REFRESH_JOB_TIMEOUT_MS,
+        stage: "\u7B49\u5F85\u5237\u65B0\u961F\u5217"
       };
       this.jobs.enqueue(job);
       this.syncRefreshState();
@@ -876,7 +893,8 @@
         bulk_running: this.bulkJobs > 0,
         max_concurrent_jobs: MAX_CONCURRENT_REFRESH_JOBS,
         result_timeout_seconds: RESULT_POLL_TIMEOUT_MS / 1e3,
-        job_timeout_seconds: REFRESH_JOB_TIMEOUT_MS / 1e3
+        job_timeout_seconds: REFRESH_JOB_TIMEOUT_MS / 1e3,
+        failures: [...this.waveFailures].map(([uuid, failure]) => ({ uuid, ...failure }))
       };
     }
     refreshResponse(accepted, message) {
@@ -919,7 +937,11 @@
         this.waveError = message;
         const affected = [.../* @__PURE__ */ new Set([...job.activeUuids, ...job.reservedUuids])];
         if (affected.length > 0) {
-          this.markFailed(affected, message);
+          this.markFailed(affected, message, {
+            stage: isRecord(error) && typeof error.stage === "string" ? error.stage : job.stage,
+            task_id: job.taskId,
+            rpc_code: rpcErrorCode(error) ?? void 0
+          });
           this.persistCache();
         }
         console.error(`[onani] hostname refresh failed: ${message}`);
@@ -940,7 +962,9 @@
       }
       const timeoutMs = Math.min(stageTimeoutMs, remaining);
       const message = remaining <= stageTimeoutMs ? `\u5237\u65B0\u4F5C\u4E1A\u8D85\u8FC7 ${REFRESH_JOB_TIMEOUT_MS / 1e3} \u79D2\u603B\u65F6\u9650\uFF0C\u5DF2\u81EA\u52A8\u53D6\u6D88` : `${operation}\u8D85\u65F6\uFF08${stageTimeoutMs / 1e3} \u79D2\uFF09`;
-      return withTimeout(call(), timeoutMs, message);
+      return withTimeout(call(), timeoutMs, message).catch((error) => {
+        throw Object.assign(new Error(`${operation}\u5931\u8D25\uFF1A${safeErrorText(error)}`), { stage: operation, code: rpcErrorCode(error) });
+      });
     }
     async reloadConfig(job) {
       const raw = job ? await this.callWithJobTimeout(
@@ -958,6 +982,7 @@
     }
     async runRefresh(job) {
       const request = job.request;
+      job.stage = "\u8BFB\u53D6\u63D2\u4EF6\u914D\u7F6E";
       const config = await this.reloadConfig(job);
       if (!config.enabled) {
         this.waveMessage = "\u4E3B\u673A\u540D\u91C7\u96C6\u529F\u80FD\u5DF2\u5173\u95ED";
@@ -967,6 +992,7 @@
         this.waveMessage = "\u81EA\u52A8\u5237\u65B0\u5DF2\u5173\u95ED";
         return;
       }
+      job.stage = "\u8BFB\u53D6\u8282\u70B9\u5217\u8868\u548C\u5728\u7EBF\u72B6\u6001";
       const [rawNodes, rawStatuses] = await Promise.all([
         this.callWithJobTimeout(
           job,
@@ -1020,10 +1046,11 @@
       const attemptedAt = (/* @__PURE__ */ new Date()).toISOString();
       for (const uuid of targets) {
         const previous = this.cache.entries[uuid] ?? {};
-        this.cache.entries[uuid] = { ...previous, last_attempt_at: attemptedAt, last_error: void 0 };
+        this.cache.entries[uuid] = { ...previous, last_attempt_at: attemptedAt, last_error: void 0, last_failure: void 0 };
       }
       this.persistCache();
       let execResponse;
+      job.stage = "\u4E0B\u53D1 hostname \u547D\u4EE4";
       try {
         execResponse = await this.callWithJobTimeout(
           job,
@@ -1036,25 +1063,26 @@
         );
       } catch (error) {
         const message = `\u65E0\u6CD5\u4E0B\u53D1\u56FA\u5B9A hostname \u547D\u4EE4\uFF1A${safeErrorText(error)}`;
-        this.markFailed(targets, message);
+        this.markFailed(targets, message, { stage: job.stage, rpc_code: rpcErrorCode(error) ?? void 0 });
         this.releaseActive(job, targets);
         this.persistCache();
         return;
       }
       const taskId = typeof execResponse.task_id === "string" ? execResponse.task_id : "";
       if (!taskId) {
-        this.markFailed(targets, "Komari \u672A\u8FD4\u56DE\u8FDC\u7A0B\u4EFB\u52A1 ID");
+        this.markFailed(targets, "Komari \u672A\u8FD4\u56DE\u8FDC\u7A0B\u4EFB\u52A1 ID", { stage: job.stage });
         this.releaseActive(job, targets);
         this.persistCache();
         return;
       }
+      job.taskId = taskId;
       const targetSet = new Set(targets);
       const accepted = new Set(
         [...stringList(execResponse.clients), ...stringList(execResponse.queued_clients)].filter((uuid) => targetSet.has(uuid))
       );
       const rejected = targets.filter((uuid) => !accepted.has(uuid));
       if (rejected.length > 0) {
-        this.markFailed(rejected, "\u8282\u70B9\u5728\u547D\u4EE4\u4E0B\u53D1\u524D\u5DF2\u79BB\u7EBF");
+        this.markFailed(rejected, "Komari \u672A\u5C06\u8282\u70B9\u5217\u5165\u5DF2\u63A5\u53D7\u6216\u5DF2\u6392\u961F\u5217\u8868\uFF0C\u8BF7\u68C0\u67E5\u8282\u70B9\u8FDE\u63A5\u4E0E\u670D\u52A1\u7AEF\u4EFB\u52A1\u65E5\u5FD7", { stage: job.stage, task_id: taskId });
         this.releaseActive(job, rejected);
       }
       await this.collectTaskResults(job, taskId, [...accepted]);
@@ -1062,6 +1090,7 @@
     }
     async collectTaskResults(job, taskId, targets) {
       const pending = new Set(targets);
+      job.stage = "\u7B49\u5F85 Agent \u8FD4\u56DE\u7ED3\u679C";
       const resultDeadline = Math.min(job.deadlineAt, Date.now() + RESULT_POLL_TIMEOUT_MS);
       let consecutiveErrors = 0;
       while (pending.size > 0 && Date.now() < resultDeadline) {
@@ -1076,17 +1105,18 @@
             timeoutMs,
             message
           );
-          if (Array.isArray(response)) results = response;
+          if (!Array.isArray(response)) throw new Error("\u8FDC\u7A0B\u4EFB\u52A1\u7ED3\u679C\u63A5\u53E3\u8FD4\u56DE\u683C\u5F0F\u5F02\u5E38\uFF1A\u9884\u671F\u6570\u7EC4");
+          results = response;
           consecutiveErrors = 0;
         } catch (error) {
-          if (isOperationTimeout(error)) throw error;
+          if (isOperationTimeout(error)) throw Object.assign(error, { stage: "\u67E5\u8BE2\u8FDC\u7A0B\u4EFB\u52A1\u7ED3\u679C" });
           if (rpcErrorCode(error) === RPC_NOT_FOUND) {
             consecutiveErrors = 0;
           } else {
             consecutiveErrors += 1;
             console.warn(`[onani] waiting for hostname task ${taskId}: ${safeErrorText(error)}`);
             if (consecutiveErrors >= 3) {
-              throw new Error(`\u8FDE\u7EED 3 \u6B21\u8BFB\u53D6\u8FDC\u7A0B\u4EFB\u52A1\u7ED3\u679C\u5931\u8D25\uFF1A${safeErrorText(error)}`);
+              throw Object.assign(new Error(`\u8FDE\u7EED 3 \u6B21\u8BFB\u53D6\u8FDC\u7A0B\u4EFB\u52A1\u7ED3\u679C\u5931\u8D25\uFF1A${safeErrorText(error)}`), { stage: "\u67E5\u8BE2\u8FDC\u7A0B\u4EFB\u52A1\u7ED3\u679C", code: rpcErrorCode(error) });
             }
           }
         }
@@ -1104,14 +1134,15 @@
                 ...previous,
                 hostname: normalized.hostname,
                 collected_at: (/* @__PURE__ */ new Date()).toISOString(),
-                last_error: void 0
+                last_error: void 0,
+                last_failure: void 0
               };
               this.refresh.succeeded += 1;
             } else {
-              this.markFailed([uuid], normalized.error);
+              this.markFailed([uuid], normalized.error, { stage: "\u89E3\u6790 hostname \u8F93\u51FA", task_id: taskId, exit_code: result.exit_code, output: safeResultOutput(result.result) });
             }
           } else {
-            this.markFailed([uuid], safeErrorText(result.result, `Agent \u8FD4\u56DE\u9000\u51FA\u7801 ${result.exit_code}`));
+            this.markFailed([uuid], `Agent \u8FD4\u56DE\u9000\u51FA\u7801 ${result.exit_code}\uFF1A${safeErrorText(result.result, "\u672A\u8FD4\u56DE\u9519\u8BEF\u8F93\u51FA")}`, { stage: "Agent \u6267\u884C hostname", task_id: taskId, exit_code: result.exit_code, output: safeResultOutput(result.result) });
           }
           this.releaseActive(job, [uuid]);
         }
@@ -1123,7 +1154,7 @@
       }
       if (pending.size > 0) {
         const message = job.deadlineAt <= resultDeadline ? `\u5237\u65B0\u4F5C\u4E1A\u8D85\u8FC7 ${REFRESH_JOB_TIMEOUT_MS / 1e3} \u79D2\u603B\u65F6\u9650\uFF0C\u5DF2\u81EA\u52A8\u53D6\u6D88` : `\u7B49\u5F85 Agent \u8FD4\u56DE\u4E3B\u673A\u540D\u8D85\u65F6\uFF08${RESULT_POLL_TIMEOUT_MS / 1e3} \u79D2\uFF09`;
-        this.markFailed([...pending], message);
+        this.markFailed([...pending], `${message}\uFF1B\u5C1A\u672A\u6536\u5230\u7ED3\u679C\uFF0C\u65E0\u6CD5\u4EC5\u51ED\u8D85\u65F6\u5224\u65AD Agent \u662F\u5426\u7981\u7528\u4E86\u8FDC\u63A7`, { stage: job.stage, task_id: taskId });
         this.releaseActive(job, [...pending]);
       }
     }
@@ -1134,11 +1165,14 @@
       }
       this.syncRefreshState();
     }
-    markFailed(uuids, message) {
+    markFailed(uuids, message, context = {}) {
       const safeMessage = safeErrorText(message);
+      const details = { ...context, stage: context.stage ?? "\u4E3B\u673A\u540D\u5237\u65B0", at: (/* @__PURE__ */ new Date()).toISOString() };
       for (const uuid of uuids) {
         const previous = this.cache.entries[uuid] ?? {};
-        this.cache.entries[uuid] = { ...previous, last_error: safeMessage };
+        this.cache.entries[uuid] = { ...previous, last_attempt_at: details.at, last_error: safeMessage, last_failure: details };
+        this.waveFailures.set(uuid, { message: safeMessage, details });
+        console.error(`[onani] hostname failed node=${uuid} stage=${details.stage} task=${details.task_id ?? "none"} rpc=${details.rpc_code ?? "none"} exit=${details.exit_code ?? "none"}: ${safeMessage}`);
         this.refresh.failed += 1;
       }
     }
@@ -1160,10 +1194,192 @@
     new HostnameFeature().load();
   }
 
+  // src/features/background/index.ts
+  var import_plugin_sdk2 = __toESM(require_src());
+
+  // src/features/background/core.ts
+  var BACKGROUND_PATH = "/api/plugins/onani/background";
+  var DEFAULT_SOURCE = "https://t.alcy.cc/ycy/";
+  function bounded(value, fallback, min, max) {
+    return typeof value === "number" && Number.isFinite(value) ? Math.max(min, Math.min(max, Math.round(value))) : fallback;
+  }
+  function resolveBackgroundConfig(raw) {
+    const source = typeof raw.background_source === "string" && raw.background_source.trim() ? raw.background_source.trim() : DEFAULT_SOURCE;
+    if (!/^https:\/\/(?:[a-z0-9][a-z0-9.-]*|\[[a-f0-9:]+\])(?::443)?(?:\/[^\s#\\]*)?$/i.test(source)) {
+      throw new Error("\u80CC\u666F\u6E90\u9700\u8981\u4E0D\u542B\u7528\u6237\u540D\u5BC6\u7801\u7684\u516C\u7F51 HTTPS \u56FE\u7247\u5730\u5740");
+    }
+    return {
+      enabled: raw.background_enabled === true,
+      webp: raw.background_webp === true,
+      source,
+      quality: bounded(raw.background_quality, 78, 40, 90)
+    };
+  }
+  function parseMetadata(value) {
+    if (!value || typeof value !== "object") throw new Error("Invalid image metadata");
+    const m = value;
+    const extensions = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif" };
+    if (!/^[a-f0-9]{64}$/.test(m.id) || !extensions[m.originalMime] || !extensions[m.previewMime] || extensions[m.originalMime] !== m.extension || typeof m.webp !== "boolean" || !Number.isSafeInteger(m.expiresAt) || m.expiresAt <= 0 || !Number.isSafeInteger(m.originalBytes) || m.originalBytes <= 0 || m.originalBytes > 16 * 1024 * 1024 || !Number.isSafeInteger(m.previewBytes) || m.previewBytes <= 0 || m.previewBytes > m.originalBytes) {
+      throw new Error("Invalid image metadata");
+    }
+    return m;
+  }
+  function parseOriginalPath(url) {
+    return /^\/api\/plugins\/onani\/background\/([a-f0-9]{64})\/original(?:\?.*)?$/.exec(url)?.[1] ?? null;
+  }
+  function originalPath(id) {
+    return `${BACKGROUND_PATH}/${id}/original`;
+  }
+
+  // src/features/background/index.ts
+  var fs2 = __require("fs");
+  var path2 = __require("path");
+  var runtimeProcess = __require("process");
+  var childProcess = __require("child_process");
+  var JOB_TIMEOUT = 3e4;
+  var BackgroundFeature = class {
+    constructor() {
+      this.cacheRoot = path2.join(__storageDir__, "background-cache");
+      this.pending = null;
+      this.nextJobAt = 0;
+      this.lastError = null;
+      this.latest = null;
+    }
+    load() {
+      import_plugin_sdk2.server.route("GET", BACKGROUND_PATH, (req, res) => this.handle(req, res, false));
+      import_plugin_sdk2.server.route("GET", `${BACKGROUND_PATH}/:id/original`, (req, res) => this.handle(req, res, true));
+      import_plugin_sdk2.server.registerRPC("plugin:onani.background.status", async () => ({
+        config: await this.config(),
+        endpoint: BACKGROUND_PATH,
+        running: Boolean(this.pending),
+        last_error: this.lastError,
+        latest: this.latest
+      }));
+    }
+    async config() {
+      const raw = await withTimeout(import_plugin_sdk2.server.getConfig(), 3e3, "\u8BFB\u53D6\u80CC\u666F\u4EE3\u7406\u914D\u7F6E\u8D85\u65F6");
+      if (raw.background_enabled !== true) return resolveBackgroundConfig({});
+      return resolveBackgroundConfig(raw);
+    }
+    prepare(config) {
+      const key = JSON.stringify(config);
+      if (this.pending) {
+        if (this.pending.key !== key) throw new Error("\u80CC\u666F\u914D\u7F6E\u5DF2\u66F4\u65B0\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5");
+        return this.pending.promise;
+      }
+      if (Date.now() < this.nextJobAt) throw new Error("\u80CC\u666F\u8BF7\u6C42\u9891\u7E41\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5");
+      this.nextJobAt = Date.now() + 2e3;
+      const promise = this.runHelper(config).then((metadata) => {
+        this.latest = metadata;
+        this.lastError = null;
+        return metadata;
+      }).catch((error) => {
+        this.lastError = error instanceof Error ? error.message : String(error);
+        console.error(`[onani] background job failed: ${this.lastError}`);
+        throw error;
+      }).finally(() => {
+        this.pending = null;
+      });
+      this.pending = { key, promise };
+      return promise;
+    }
+    runHelper(config) {
+      const os = runtimeProcess.platform === "win32" ? "windows" : runtimeProcess.platform;
+      const arch = runtimeProcess.arch === "x64" ? "amd64" : runtimeProcess.arch;
+      if (!["linux", "windows", "darwin"].includes(os) || !["amd64", "arm64"].includes(arch)) {
+        return Promise.reject(new Error("\u80CC\u666F\u4EE3\u7406\u4E0D\u652F\u6301\u5F53\u524D\u670D\u52A1\u5668\u67B6\u6784"));
+      }
+      const executable = path2.join(runtimeProcess.cwd(), "bin", `onani-background-${os}-${arch}${os === "windows" ? ".exe" : ""}`);
+      if (!fs2.existsSync(executable)) return Promise.reject(new Error("\u63D2\u4EF6\u5B89\u88C5\u5305\u7F3A\u5C11\u5F53\u524D\u67B6\u6784\u7684\u80CC\u666F\u5904\u7406\u7A0B\u5E8F"));
+      if (os !== "windows") fs2.chmodSync(executable, 448);
+      const args = ["-cache", this.cacheRoot, "-source", config.source, `-webp=${config.webp}`, "-quality", String(config.quality)];
+      return new Promise((resolve, reject) => {
+        childProcess.execFile(executable, args, { timeout: JOB_TIMEOUT, maxBuffer: 16384, encoding: "utf8", windowsHide: true }, (error, stdout, stderr) => {
+          if (error) {
+            reject(new Error(`\u56FE\u7247\u5904\u7406\u5931\u8D25: ${stderr.trim().slice(0, 500) || error.message}`));
+            return;
+          }
+          try {
+            resolve(parseMetadata(JSON.parse(stdout)));
+          } catch (error2) {
+            reject(error2);
+          }
+        });
+      });
+    }
+    async handle(req, res, download) {
+      res.setHeader("Cache-Control", "private, no-store, max-age=0");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      try {
+        const config = await this.config();
+        if (!config.enabled) {
+          this.error(res, 404, "\u80CC\u666F\u4EE3\u7406\u672A\u542F\u7528");
+          return;
+        }
+        let metadata;
+        if (download) {
+          const id = parseOriginalPath(req.url);
+          if (!id) {
+            this.error(res, 404, "\u56FE\u7247\u4E0D\u5B58\u5728");
+            return;
+          }
+          try {
+            metadata = parseMetadata(JSON.parse(fs2.readFileSync(path2.join(this.cacheRoot, id, "meta.json"), "utf8")));
+          } catch {
+            this.error(res, 410, "\u5F53\u524D\u80CC\u666F\u539F\u56FE\u5DF2\u8FC7\u671F\uFF0C\u8BF7\u5237\u65B0\u9875\u9762\u91CD\u65B0\u52A0\u8F7D\u80CC\u666F");
+            return;
+          }
+          if (metadata.id !== id || metadata.expiresAt <= Date.now()) {
+            this.error(res, 410, "\u5F53\u524D\u80CC\u666F\u539F\u56FE\u5DF2\u8FC7\u671F\uFF0C\u8BF7\u5237\u65B0\u9875\u9762\u91CD\u65B0\u52A0\u8F7D\u80CC\u666F");
+            return;
+          }
+        } else {
+          metadata = await this.prepare(config);
+          if (!(await this.config()).enabled) {
+            this.error(res, 404, "\u80CC\u666F\u4EE3\u7406\u672A\u542F\u7528");
+            return;
+          }
+        }
+        if (res.isAborted()) return;
+        let data;
+        try {
+          data = fs2.readFileSync(path2.join(this.cacheRoot, metadata.id, download ? "original" : "preview"));
+        } catch {
+          this.error(res, 410, "\u5F53\u524D\u80CC\u666F\u7F13\u5B58\u5DF2\u8FC7\u671F\uFF0C\u8BF7\u5237\u65B0\u9875\u9762\u91CD\u65B0\u52A0\u8F7D\u80CC\u666F");
+          return;
+        }
+        res.setHeader("Content-Type", download ? metadata.originalMime : metadata.previewMime);
+        res.setHeader("Content-Length", String(data.length));
+        if (download) {
+          res.setHeader("Content-Disposition", `attachment; filename="komari-background-${metadata.id.slice(0, 12)}.${metadata.extension}"`);
+        } else {
+          res.setHeader("X-Onani-Original", originalPath(metadata.id));
+          res.setHeader("X-Onani-Preview", metadata.webp ? "webp" : "original");
+        }
+        res.statusCode = 200;
+        res.write(data);
+        res.end();
+      } catch (error) {
+        this.lastError = error instanceof Error ? error.message : String(error);
+        console.error(`[onani] background request failed: ${this.lastError}`);
+        this.error(res, 503, "\u80CC\u666F\u6682\u65F6\u65E0\u6CD5\u52A0\u8F7D\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5");
+      }
+    }
+    error(res, status, message) {
+      res.statusCode = status;
+      res.setHeader("Content-Type", "application/json; charset=utf-8");
+      res.end(JSON.stringify({ error: message }));
+    }
+  };
+  function registerBackgroundFeature() {
+    new BackgroundFeature().load();
+  }
+
   // src/plugin.ts
-  (0, import_plugin_sdk2.definePlugin)({
+  (0, import_plugin_sdk3.definePlugin)({
     load() {
       registerHostnameFeature();
+      registerBackgroundFeature();
     }
   });
 })();

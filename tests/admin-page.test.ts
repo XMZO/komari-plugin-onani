@@ -373,7 +373,7 @@ test("successful update reloads fixed asset URLs and leaves only a transient mar
         json: async () => ({ status: "success", data: { short: "onani", version: "0.1.9" } }),
       };
     }
-    if (path.endsWith("/index.css") || path.endsWith("/index.js")) {
+    if (path.endsWith("/index.css") || path.endsWith("/index.js") || path.endsWith("/background.js")) {
       assetRequests.push({ path, cache: init?.cache });
       return { ok: true, status: 200 };
     }
@@ -393,8 +393,9 @@ test("successful update reloads fixed asset URLs and leaves only a transient mar
 
   assert.equal(browser.reloads, 1);
   assert.equal(browser.session.get("onani:updated-version"), "0.1.9");
-  assert.deepEqual(assetRequests.map((request) => request.cache), ["reload", "reload"]);
+  assert.deepEqual(assetRequests.map((request) => request.cache), ["reload", "reload", "reload"]);
   assert.deepEqual(assetRequests.map((request) => new URL(request.path).pathname).sort(), [
+    "/api/admin/plugin/onani/pages/background.js",
     "/api/admin/plugin/onani/pages/index.css",
     "/api/admin/plugin/onani/pages/index.js",
   ]);
@@ -527,4 +528,25 @@ test("hostname changes replace only the affected row", () => {
   assert.deepEqual(elements.get("node-list")!.children, afterRunning);
   assert.equal(elements.get("refresh-due")!.disabled, true);
   assert.equal(elements.get("force-all")!.disabled, true);
+});
+
+
+test("failure reasons are visible, task details update and completion summary persists", () => {
+  const { context, elements } = createPageContext();
+  vm.runInContext(`viewState = ${JSON.stringify(fixtureData())};
+    viewState.pluginStatus.refresh = {running:false, finished_at:"2026-09-20T01:00:00Z", failed:1, message:"刷新完成：成功 0，失败 1"};
+    viewState.pluginStatus.entries["f9e79538-e4a8-43b2-8e58-a1857c82cc5f"].last_failure = {stage:"Agent 执行 hostname",at:"2026-09-20T01:00:00Z",task_id:"task-123",exit_code:-1,output:"Remote control is disabled."};
+    renderCurrentView();`, context);
+  const texts = (node: any): string => [node.textContent || "", ...(node.children || []).map(texts)].join("\n");
+  const first = elements.get("node-list")!.children[0] as FakeElement;
+  assert.match(texts(first), /错误详情/);
+  assert.match(texts(first), /task-123/);
+  assert.match(texts(first), /Remote control is disabled/);
+  assert.match(texts(first), /复制排查信息/);
+  assert.equal(elements.get("refresh-summary")!.hidden, false);
+  assert.match(elements.get("refresh-summary")!.textContent, /失败 1/);
+  vm.runInContext(`viewState.pluginStatus.entries["f9e79538-e4a8-43b2-8e58-a1857c82cc5f"].last_failure.task_id="task-456";renderCurrentView();`, context);
+  assert.notEqual(elements.get("node-list")!.children[0], first);
+  assert.match(texts(elements.get("node-list")!.children[0]), /task-456/);
+  assert.equal(elements.get("refresh-summary")!.hidden, false);
 });

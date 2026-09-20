@@ -1,6 +1,6 @@
 {
   "name": "komari-plugin-onani",
-  "version": "0.1.8",
+  "version": "0.2.1",
   "private": true,
   "description": "A small, security-focused Komari toolbox plugin.",
   "packageManager": "pnpm@10.30.3",
@@ -10,20 +10,24 @@
   "scripts": {
     "check": "komari-plugin-dev check",
     "build": "komari-plugin-dev build",
+    "build:helper": "tsx scripts/build-helper.ts",
+    "test:helper": "cd helper && go test -tags=nodynamic ./...",
+    "verify:runtime": "tsx scripts/verify-runtime.ts",
     "clean:dist": "tsx scripts/release-assets.ts clean",
-    "pack": "pnpm run clean:dist && komari-plugin-dev pack",
+    "pack": "pnpm run build:helper && pnpm run clean:dist && komari-plugin-dev pack",
     "release:metadata": "tsx scripts/release-assets.ts metadata",
     "release:assets": "pnpm run verify && pnpm run pack && pnpm run release:metadata",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test tests/hostname-core.test.ts tests/json-store.test.ts tests/async-timeout.test.ts tests/bounded-job-queue.test.ts tests/release-assets.test.ts tests/admin-page.test.ts",
-    "verify": "pnpm typecheck && pnpm test && pnpm check && pnpm build",
+    "test": "tsx --test tests/*.test.ts",
+    "verify": "pnpm typecheck && pnpm test && pnpm test:helper && pnpm build:helper && pnpm check && pnpm build",
     "plugin:install": "komari-plugin-dev install --enable",
     "dev": "komari-plugin-dev dev"
   },
   "komari": {
     "source": "src/plugin.ts",
     "files": [
-      "pages"
+      "pages",
+      "bin"
     ]
   },
   "dependencies": {

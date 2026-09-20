@@ -6,10 +6,10 @@
   },
   "short": "onani",
   "description": {
-    "zh-CN": "轻量、安全、可扩展的 Komari 工具箱；当前提供节点主机名采集与缓存。",
-    "en": "A small, security-focused and extensible Komari toolbox. Currently provides cached node hostname discovery."
+    "zh-CN": "Komari 工具箱：节点主机名缓存、可选背景代理及 原尺寸 WebP 背景与原图下载。",
+    "en": "Komari toolbox with hostname caching and optional background proxy, full-resolution WebP backgrounds and original downloads."
   },
-  "version": "0.1.8",
+  "version": "0.2.1",
   "entry": "script.js",
   "author": "XMZO",
   "url": "https://github.com/XMZO/komari-plugin-onani",
@@ -17,11 +17,20 @@
   "permissions": {
     "node": true,
     "allowSystemRPC": true,
-    "timeout": 10
+    "allowRoutes": true,
+    "allowExec": true,
+    "maxHTTPBodyBytes": 20971520,
+    "timeout": 40
   },
   "configuration": {
     "type": "managed",
     "data": [
+      { "type": "title", "name": "背景图片" },
+      { "key": "background_enabled", "name": "启用背景代理", "type": "switch", "default": false, "help": "为公开主页提供同域背景图片。启用后将 Naive 主题的背景地址设为 /api/plugins/onani/background；关闭后停止提供背景及原图下载。" },
+      { "key": "background_webp", "name": "WebP 原尺寸背景，下载原图", "type": "switch", "default": false, "help": "保持原图宽高，仅压缩为 WebP，点击下载获取转换前的原文件。转码失败或没有变小时保留原图；需要 Naive 2.0.38 或更新版本。" },
+      { "key": "background_source", "name": "背景图片源", "type": "string", "default": "https://t.alcy.cc/ycy/", "help": "支持公网 HTTPS 图片及随机图接口，可跟随跳转到其他公网域名；禁止内网目标。原图最多保留 24 小时，缓存上限 256 MiB / 128 张。" },
+      { "key": "background_quality", "name": "WebP 压缩质量", "type": "number", "default": 78, "help": "40–90；仅影响网页背景的压缩质量，不缩小尺寸，下载原图保持不变。" },
+      { "type": "title", "name": "节点主机名" },
       {
         "key": "hostname_enabled",
         "name": {

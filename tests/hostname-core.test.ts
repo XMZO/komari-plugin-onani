@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   DEFAULT_CACHE_DAYS,
+  safeResultOutput,
+  safeErrorText,
   normalizeHostname,
   normalizeHostnameCache,
   normalizeUuidList,
@@ -71,4 +73,15 @@ test("cache and UUID inputs are normalized before use", () => {
   assert.deepEqual(Object.keys(cache.entries), [uuid.toLowerCase()]);
   assert.equal(cache.entries[uuid.toLowerCase()].hostname, "node-a");
   assert.equal(cache.entries[uuid.toLowerCase()].last_error, "bad error");
+});
+
+
+test("failure diagnostics survive cache reload with bounded output and real error codes", () => {
+  const uuid = "f9e79538-e4a8-43b2-8e58-a1857c82cc5f";
+  const failure = { stage: "Agent 执行 hostname", at: "2026-09-20T01:00:00.000Z", task_id: "task-123", rpc_code: -32044, exit_code: 0, output: "first\nsecond" };
+  const cache = normalizeHostnameCache({ schema: 1, entries: { [uuid]: { last_error: "Agent 返回了多行结果", last_failure: failure } } });
+  assert.deepEqual(cache.entries[uuid].last_failure, failure);
+  assert.equal(safeResultOutput("\u001b[31mfailed\u001b[0m\nreason\u0000"), "failed\nreason");
+  assert.equal(safeResultOutput("x".repeat(3000)).length, 2048);
+  assert.equal(safeErrorText({ code: -32000, message: "RPC unavailable" }), "RPC unavailable");
 });

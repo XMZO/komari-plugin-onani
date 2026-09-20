@@ -1,0 +1,274 @@
+package plugin
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"github.com/komari-monitor/komari/pkg/rpc"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/utils"
+)
+
+// This opt-in test fetches one known public image using the real native helper.
+// Everything else (database, installation, config, cache) is isolated by Komari's test harness.
+func TestOnaniBackgroundRuntime(t *testing.T) {
+	oldVersion := utils.CurrentVersion
+	utils.CurrentVersion = "1.4.3"
+	defer func() { utils.CurrentVersion = oldVersion }()
+	withTempDataDir(t)
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	Init(engine)
+	root := os.Getenv("ONANI_PROJECT_ROOT")
+	if root == "" {
+		t.Fatal("ONANI_PROJECT_ROOT is required")
+	}
+	binary := "onani-background-" + runtime.GOOS + "-" + runtime.GOARCH
+	if runtime.GOOS == "windows" {
+		binary += ".exe"
+	}
+	files := map[string]string{}
+	for _, name := range []string{"komari-plugin.json", "script.js", "pages/index.html", "pages/index.js", "pages/index.css", "pages/background.js", "bin/" + binary} {
+		data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(name)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[name] = string(data)
+	}
+	if _, err := InstallZip(writePluginZip(t, files)); err != nil {
+		t.Fatal(err)
+	}
+	config := map[string]any{"hostname_enabled": false, "background_enabled": false, "background_webp": true,
+		"background_source": "https://t.alcy.cc/pic/pc/2025-10-913c0a13ec6c8e51ac40d9239419d345.webp"}
+	if err := SaveConfiguration("onani", config); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetEnabled("onani", true, true); err != nil {
+		t.Fatal(err)
+	}
+	defer SetEnabled("onani", false, false)
+	request := func(url string) *httptest.ResponseRecorder {
+		r := httptest.NewRecorder()
+		engine.ServeHTTP(r, httptest.NewRequest(http.MethodGet, url, nil))
+		return r
+	}
+	endpoint := "/api/plugins/onani/background"
+	if r := request(endpoint); r.Code != 404 {
+		t.Fatalf("disabled: %d %s", r.Code, r.Body.String())
+	}
+	config["background_enabled"] = true
+	if err := SaveConfiguration("onani", config); err != nil {
+		t.Fatal(err)
+	}
+	preview := request(endpoint)
+	if preview.Code != 200 {
+		t.Fatalf("preview: %d %s\nlogs: %s", preview.Code, preview.Body.String(), GetLogs("onani"))
+	}
+	if preview.Header().Get("X-Onani-Preview") != "webp" || preview.Header().Get("Content-Type") != "image/webp" {
+		t.Fatalf("headers=%v", preview.Header())
+	}
+	if !strings.Contains(preview.Header().Get("Cache-Control"), "no-store") {
+		t.Fatal("random endpoint can be cached")
+	}
+	originalPath := preview.Header().Get("X-Onani-Original")
+	original := request(originalPath)
+	if original.Code != 200 {
+		t.Fatalf("original: %d %s", original.Code, original.Body.String())
+	}
+	if !strings.Contains(original.Header().Get("Content-Disposition"), "attachment;") {
+		t.Fatal("missing download disposition")
+	}
+	if original.Body.Len() <= preview.Body.Len() {
+		t.Fatal("preview not smaller")
+	}
+	id := strings.Split(originalPath, "/")[5]
+	disk, err := os.ReadFile(filepath.Join(StorageDir, "onani", "background-cache", id, "original"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(disk, original.Body.Bytes()) {
+		t.Fatal("download differs from original cache")
+	}
+	repeated := request(originalPath)
+	if !bytes.Equal(repeated.Body.Bytes(), original.Body.Bytes()) {
+		t.Fatal("download changed on repeat")
+	}
+	t.Logf("real runtime: original=%d preview=%d savings=%.1f%%", original.Body.Len(), preview.Body.Len(), 100*(1-float64(preview.Body.Len())/float64(original.Body.Len())))
+	metadataPath := filepath.Join(StorageDir, "onani", "background-cache", id, "meta.json")
+	raw, err := os.ReadFile(metadataPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	json.Unmarshal(raw, &m)
+	m["expiresAt"] = 1
+	raw, _ = json.Marshal(m)
+	os.WriteFile(metadataPath, raw, 0600)
+	if r := request(originalPath); r.Code != 410 {
+		t.Fatalf("expired original: %d", r.Code)
+	}
+	if r := request(endpoint + "/" + strings.Repeat("f", 64) + "/original"); r.Code != 410 {
+		t.Fatalf("missing original: %d", r.Code)
+	}
+	config["background_enabled"] = false
+	SaveConfiguration("onani", config)
+	if r := request(originalPath); r.Code != 404 {
+		t.Fatalf("disabled original: %d", r.Code)
+	}
+}
+
+// Exercise the real plugin scheduler and cache against deterministic Komari RPC fixtures.
+func TestOnaniHostnameRuntime(t *testing.T) {
+	oldVersion := utils.CurrentVersion
+	utils.CurrentVersion = "1.4.3"
+	defer func() { utils.CurrentVersion = oldVersion }()
+	withTempDataDir(t)
+	gin.SetMode(gin.TestMode)
+	Init(gin.New())
+	root := os.Getenv("ONANI_PROJECT_ROOT")
+	files := map[string]string{}
+	for _, name := range []string{"komari-plugin.json", "script.js", "pages/index.html"} {
+		data, err := os.ReadFile(filepath.Join(root, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[name] = string(data)
+	}
+	if _, err := InstallZip(writePluginZip(t, files)); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveConfiguration("onani", map[string]any{"hostname_enabled": true, "hostname_auto_refresh": false, "background_enabled": false}); err != nil {
+		t.Fatal(err)
+	}
+	const uuid = "f9e79538-e4a8-43b2-8e58-a1857c82cc5f"
+	var scenario atomic.Int32
+	register := func(name string, handler rpc.Handler) {
+		t.Helper()
+		if err := rpc.Register(name, handler); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { rpc.Unregister(name) })
+	}
+	register("common:getNodes", func(context.Context, *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+		return map[string]any{uuid: map[string]any{"name": "diagnostic fixture"}}, nil
+	})
+	register("common:getNodesLatestStatus", func(context.Context, *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+		return map[string]any{uuid: map[string]any{"online": true}}, nil
+	})
+	register("admin:exec", func(context.Context, *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+		if scenario.Load() == 3 {
+			return nil, &rpc.JsonRpcError{Code: -32001, Message: "dispatch fixture rejected"}
+		}
+		return map[string]any{"task_id": "diagnostic-task-123", "clients": []string{uuid}}, nil
+	})
+	register("admin:getTaskResultsByTaskId", func(context.Context, *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+		switch scenario.Load() {
+		case 1:
+			return []any{map[string]any{"client": uuid, "exit_code": -1, "result": "Remote control is disabled."}}, nil
+		case 2:
+			return []any{map[string]any{"client": uuid, "exit_code": 0, "result": ""}}, nil
+		case 4:
+			return nil, &rpc.JsonRpcError{Code: -32002, Message: "results fixture unavailable"}
+		case 5:
+			return []any{}, nil
+		default:
+			return []any{map[string]any{"client": uuid, "exit_code": 0, "result": "fixture-host"}}, nil
+		}
+	})
+	if err := SetEnabled("onani", true, true); err != nil {
+		t.Fatal(err)
+	}
+	defer SetEnabled("onani", false, false)
+	ctx := rpc.NewContextWithMeta(context.Background(), &rpc.ContextMeta{Permission: rpc.RoleAdmin})
+	call := func(method string, params any) map[string]any {
+		t.Helper()
+		res := rpc.CallWithContext(ctx, "test", method, params)
+		if res.Error != nil {
+			t.Fatalf("%s: %+v", method, res.Error)
+		}
+		raw, _ := json.Marshal(res.Result)
+		var out map[string]any
+		if err := json.Unmarshal(raw, &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	cases := []struct {
+		id                    int32
+		name, contains, stage string
+		rpcCode, exitCode     int
+	}{
+		{1, "agent failure", "Remote control is disabled.", "Agent 执行 hostname", 0, -1},
+		{2, "empty hostname", "空主机名", "解析 hostname 输出", 0, 0},
+		{3, "dispatch failure", "dispatch fixture rejected", "下发 hostname 命令", -32001, 0},
+		{4, "query failure", "results fixture unavailable", "查询远程任务结果", -32002, 0},
+		{5, "agent timeout", "尚未收到结果", "等待 Agent 返回结果", 0, 0},
+		{6, "recovery", "", "", 0, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			scenario.Store(tc.id)
+			call("plugin:onani.hostname.refresh", map[string]any{"force": true, "uuids": []string{uuid}})
+			deadline := time.Now().Add(35 * time.Second)
+			var state map[string]any
+			for {
+				state = call("plugin:onani.hostname.status", nil)
+				if state["refresh"].(map[string]any)["running"] == false {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("refresh never completed")
+				}
+				time.Sleep(25 * time.Millisecond)
+			}
+			entry := state["entries"].(map[string]any)[uuid].(map[string]any)
+			if tc.id == 6 {
+				if entry["hostname"] != "fixture-host" || entry["last_failure"] != nil || entry["last_error"] != nil {
+					t.Fatalf("recovery: %+v", entry)
+				}
+				return
+			}
+			if !strings.Contains(entry["last_error"].(string), tc.contains) {
+				t.Fatalf("wrong error: %+v", entry)
+			}
+			details, ok := entry["last_failure"].(map[string]any)
+			if !ok || details["stage"] != tc.stage || details["at"] == nil {
+				t.Fatalf("missing diagnostics: %+v", entry)
+			}
+			if tc.id != 3 && details["task_id"] != "diagnostic-task-123" {
+				t.Fatalf("missing task: %+v", details)
+			}
+			if tc.rpcCode != 0 && details["rpc_code"] != float64(tc.rpcCode) {
+				t.Fatalf("missing RPC code: %+v", details)
+			}
+			if tc.id <= 2 && details["exit_code"] != float64(tc.exitCode) {
+				t.Fatalf("missing exit code: %+v", details)
+			}
+			if tc.id == 1 && details["output"] != "Remote control is disabled." {
+				t.Fatalf("missing output: %+v", details)
+			}
+			raw, err := os.ReadFile(filepath.Join(StorageDir, "onani", "hostname-cache.json"))
+			if err != nil || !bytes.Contains(raw, []byte(tc.contains)) {
+				t.Fatalf("diagnostics not persisted: %v %s", err, raw)
+			}
+			if !strings.Contains(GetLogs("onani"), tc.contains) {
+				t.Fatal("diagnostics missing from plugin log")
+			}
+			refresh := state["refresh"].(map[string]any)
+			if refresh["active_jobs"] != float64(0) || refresh["queued_jobs"] != float64(0) {
+				t.Fatal("job slot leaked")
+			}
+			t.Logf("diagnostic: %s", entry["last_error"])
+		})
+	}
+}

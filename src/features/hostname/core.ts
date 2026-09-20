@@ -25,7 +25,32 @@ export type HostnameCacheEntry = {
   collected_at?: string;
   last_attempt_at?: string;
   last_error?: string;
+  last_failure?: HostnameFailure;
 };
+
+export type HostnameFailure = {
+  stage: string;
+  at: string;
+  task_id?: string;
+  rpc_code?: number;
+  exit_code?: number;
+  output?: string;
+};
+
+export function normalizeFailure(value: unknown): HostnameFailure | undefined {
+  if (!isRecord(value) || typeof value.stage !== "string" || !validIsoTimestamp(value.at)) return undefined;
+  const failure: HostnameFailure = { stage: safeErrorText(value.stage), at: value.at };
+  if (typeof value.task_id === "string" && value.task_id.trim()) failure.task_id = safeErrorText(value.task_id).slice(0, 128);
+  if (typeof value.rpc_code === "number" && Number.isSafeInteger(value.rpc_code)) failure.rpc_code = value.rpc_code;
+  if (typeof value.exit_code === "number" && Number.isSafeInteger(value.exit_code)) failure.exit_code = value.exit_code;
+  if (typeof value.output === "string" && value.output.trim()) failure.output = safeResultOutput(value.output);
+  return failure;
+}
+
+export function safeResultOutput(value: unknown): string {
+  if (typeof value !== "string") return "";
+  return value.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "").trim().slice(0, 2048);
+}
 
 export type HostnameCache = {
   schema: typeof HOSTNAME_CACHE_SCHEMA;
@@ -91,6 +116,7 @@ function normalizeCacheEntry(value: unknown): HostnameCacheEntry | null {
   if (validIsoTimestamp(value.last_attempt_at)) entry.last_attempt_at = value.last_attempt_at;
   if (typeof value.last_error === "string" && value.last_error.trim()) {
     entry.last_error = safeErrorText(value.last_error);
+    entry.last_failure = normalizeFailure(value.last_failure);
   }
   return entry;
 }
@@ -165,9 +191,10 @@ export function normalizeHostname(output: unknown): HostnameResult {
 }
 
 export function safeErrorText(value: unknown, fallback = "未知错误"): string {
-  const text = value instanceof Error ? value.message : typeof value === "string" ? value : fallback;
+  const text = value instanceof Error ? value.message : typeof value === "string" ? value
+    : isRecord(value) && typeof value.message === "string" ? value.message : fallback;
   const compact = text.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
-  return (compact || fallback).slice(0, 180);
+  return (compact || fallback).slice(0, 512);
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {

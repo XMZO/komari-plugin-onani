@@ -12,11 +12,13 @@ import {
   normalizeUuidList,
   resolveHostnameConfig,
   safeErrorText,
+  safeResultOutput,
   shouldRefreshHostname,
   type HostnameCache,
   type HostnameCacheEntry,
   type HostnameConfig,
   type HostnameConfigInput,
+  type HostnameFailure,
 } from "./core";
 
 const STATUS_RPC = "plugin:onani.hostname.status";
@@ -70,6 +72,8 @@ type RefreshJob = {
   activeUuids: Set<string>;
   bulk: boolean;
   deadlineAt: number;
+  stage: string;
+  taskId?: string;
 };
 
 type RefreshState = {
@@ -163,6 +167,7 @@ class HostnameFeature {
   private bulkJobs = 0;
   private waveMessage: string | null = null;
   private waveError: string | null = null;
+  private readonly waveFailures = new Map<string, { message: string; details: HostnameFailure }>();
   private readonly jobs = new BoundedJobQueue<RefreshJob>(
     MAX_CONCURRENT_REFRESH_JOBS,
     (job) => this.processRefreshJob(job),
@@ -239,6 +244,7 @@ class HostnameFeature {
       };
       this.waveMessage = null;
       this.waveError = null;
+      this.waveFailures.clear();
     } else if (request.reason === "manual") {
       this.refresh.reason = "manual";
     }
@@ -253,6 +259,7 @@ class HostnameFeature {
       activeUuids: new Set<string>(),
       bulk,
       deadlineAt: Date.now() + REFRESH_JOB_TIMEOUT_MS,
+      stage: "等待刷新队列",
     };
     this.jobs.enqueue(job);
     this.syncRefreshState();
@@ -275,6 +282,7 @@ class HostnameFeature {
       max_concurrent_jobs: MAX_CONCURRENT_REFRESH_JOBS,
       result_timeout_seconds: RESULT_POLL_TIMEOUT_MS / 1000,
       job_timeout_seconds: REFRESH_JOB_TIMEOUT_MS / 1000,
+      failures: [...this.waveFailures].map(([uuid, failure]) => ({ uuid, ...failure })),
     };
   }
 
@@ -324,7 +332,11 @@ class HostnameFeature {
       this.waveError = message;
       const affected = [...new Set([...job.activeUuids, ...job.reservedUuids])];
       if (affected.length > 0) {
-        this.markFailed(affected, message);
+        this.markFailed(affected, message, {
+          stage: isRecord(error) && typeof error.stage === "string" ? error.stage : job.stage,
+          task_id: job.taskId,
+          rpc_code: rpcErrorCode(error) ?? undefined,
+        });
         this.persistCache();
       }
       console.error(`[onani] hostname refresh failed: ${message}`);
@@ -353,7 +365,9 @@ class HostnameFeature {
     const message = remaining <= stageTimeoutMs
       ? `刷新作业超过 ${REFRESH_JOB_TIMEOUT_MS / 1000} 秒总时限，已自动取消`
       : `${operation}超时（${stageTimeoutMs / 1000} 秒）`;
-    return withTimeout(call(), timeoutMs, message);
+    return withTimeout(call(), timeoutMs, message).catch((error: unknown) => {
+      throw Object.assign(new Error(`${operation}失败：${safeErrorText(error)}`), { stage: operation, code: rpcErrorCode(error) });
+    });
   }
 
   private async reloadConfig(job?: RefreshJob): Promise<HostnameConfig> {
@@ -375,6 +389,7 @@ class HostnameFeature {
 
   private async runRefresh(job: RefreshJob): Promise<void> {
     const request = job.request;
+    job.stage = "读取插件配置";
     const config = await this.reloadConfig(job);
     if (!config.enabled) {
       this.waveMessage = "主机名采集功能已关闭";
@@ -385,6 +400,7 @@ class HostnameFeature {
       return;
     }
 
+    job.stage = "读取节点列表和在线状态";
     const [rawNodes, rawStatuses] = await Promise.all([
       this.callWithJobTimeout(
         job,
@@ -443,11 +459,12 @@ class HostnameFeature {
     const attemptedAt = new Date().toISOString();
     for (const uuid of targets) {
       const previous = this.cache.entries[uuid] ?? {};
-      this.cache.entries[uuid] = { ...previous, last_attempt_at: attemptedAt, last_error: undefined };
+      this.cache.entries[uuid] = { ...previous, last_attempt_at: attemptedAt, last_error: undefined, last_failure: undefined };
     }
     this.persistCache();
 
     let execResponse: ExecResponse;
+    job.stage = "下发 hostname 命令";
     try {
       execResponse = await this.callWithJobTimeout(
         job,
@@ -460,7 +477,7 @@ class HostnameFeature {
       );
     } catch (error) {
       const message = `无法下发固定 hostname 命令：${safeErrorText(error)}`;
-      this.markFailed(targets, message);
+      this.markFailed(targets, message, { stage: job.stage, rpc_code: rpcErrorCode(error) ?? undefined });
       this.releaseActive(job, targets);
       this.persistCache();
       return;
@@ -468,12 +485,13 @@ class HostnameFeature {
 
     const taskId = typeof execResponse.task_id === "string" ? execResponse.task_id : "";
     if (!taskId) {
-      this.markFailed(targets, "Komari 未返回远程任务 ID");
+      this.markFailed(targets, "Komari 未返回远程任务 ID", { stage: job.stage });
       this.releaseActive(job, targets);
       this.persistCache();
       return;
     }
 
+    job.taskId = taskId;
     const targetSet = new Set(targets);
     const accepted = new Set(
       [...stringList(execResponse.clients), ...stringList(execResponse.queued_clients)]
@@ -481,7 +499,7 @@ class HostnameFeature {
     );
     const rejected = targets.filter((uuid) => !accepted.has(uuid));
     if (rejected.length > 0) {
-      this.markFailed(rejected, "节点在命令下发前已离线");
+      this.markFailed(rejected, "Komari 未将节点列入已接受或已排队列表，请检查节点连接与服务端任务日志", { stage: job.stage, task_id: taskId });
       this.releaseActive(job, rejected);
     }
     await this.collectTaskResults(job, taskId, [...accepted]);
@@ -490,6 +508,7 @@ class HostnameFeature {
 
   private async collectTaskResults(job: RefreshJob, taskId: string, targets: string[]): Promise<void> {
     const pending = new Set(targets);
+    job.stage = "等待 Agent 返回结果";
     const resultDeadline = Math.min(job.deadlineAt, Date.now() + RESULT_POLL_TIMEOUT_MS);
     let consecutiveErrors = 0;
 
@@ -509,17 +528,18 @@ class HostnameFeature {
           timeoutMs,
           message,
         );
-        if (Array.isArray(response)) results = response as TaskResult[];
+        if (!Array.isArray(response)) throw new Error("远程任务结果接口返回格式异常：预期数组");
+        results = response as TaskResult[];
         consecutiveErrors = 0;
       } catch (error) {
-        if (isOperationTimeout(error)) throw error;
+        if (isOperationTimeout(error)) throw Object.assign(error, { stage: "查询远程任务结果" });
         if (rpcErrorCode(error) === RPC_NOT_FOUND) {
           consecutiveErrors = 0;
         } else {
           consecutiveErrors += 1;
           console.warn(`[onani] waiting for hostname task ${taskId}: ${safeErrorText(error)}`);
           if (consecutiveErrors >= 3) {
-            throw new Error(`连续 3 次读取远程任务结果失败：${safeErrorText(error)}`);
+            throw Object.assign(new Error(`连续 3 次读取远程任务结果失败：${safeErrorText(error)}`), { stage: "查询远程任务结果", code: rpcErrorCode(error) });
           }
         }
       }
@@ -539,13 +559,14 @@ class HostnameFeature {
               hostname: normalized.hostname,
               collected_at: new Date().toISOString(),
               last_error: undefined,
+              last_failure: undefined,
             };
             this.refresh.succeeded += 1;
           } else {
-            this.markFailed([uuid], normalized.error);
+            this.markFailed([uuid], normalized.error, { stage: "解析 hostname 输出", task_id: taskId, exit_code: result.exit_code, output: safeResultOutput(result.result) });
           }
         } else {
-          this.markFailed([uuid], safeErrorText(result.result, `Agent 返回退出码 ${result.exit_code}`));
+          this.markFailed([uuid], `Agent 返回退出码 ${result.exit_code}：${safeErrorText(result.result, "未返回错误输出")}`, { stage: "Agent 执行 hostname", task_id: taskId, exit_code: result.exit_code, output: safeResultOutput(result.result) });
         }
         this.releaseActive(job, [uuid]);
       }
@@ -560,7 +581,7 @@ class HostnameFeature {
       const message = job.deadlineAt <= resultDeadline
         ? `刷新作业超过 ${REFRESH_JOB_TIMEOUT_MS / 1000} 秒总时限，已自动取消`
         : `等待 Agent 返回主机名超时（${RESULT_POLL_TIMEOUT_MS / 1000} 秒）`;
-      this.markFailed([...pending], message);
+      this.markFailed([...pending], `${message}；尚未收到结果，无法仅凭超时判断 Agent 是否禁用了远控`, { stage: job.stage, task_id: taskId });
       this.releaseActive(job, [...pending]);
     }
   }
@@ -573,11 +594,14 @@ class HostnameFeature {
     this.syncRefreshState();
   }
 
-  private markFailed(uuids: string[], message: string): void {
+  private markFailed(uuids: string[], message: string, context: Partial<HostnameFailure> = {}): void {
     const safeMessage = safeErrorText(message);
+    const details: HostnameFailure = { ...context, stage: context.stage ?? "主机名刷新", at: new Date().toISOString() };
     for (const uuid of uuids) {
       const previous: HostnameCacheEntry = this.cache.entries[uuid] ?? {};
-      this.cache.entries[uuid] = { ...previous, last_error: safeMessage };
+      this.cache.entries[uuid] = { ...previous, last_attempt_at: details.at, last_error: safeMessage, last_failure: details };
+      this.waveFailures.set(uuid, { message: safeMessage, details });
+      console.error(`[onani] hostname failed node=${uuid} stage=${details.stage} task=${details.task_id ?? "none"} rpc=${details.rpc_code ?? "none"} exit=${details.exit_code ?? "none"}: ${safeMessage}`);
       this.refresh.failed += 1;
     }
   }

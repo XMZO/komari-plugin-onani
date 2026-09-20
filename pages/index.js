@@ -3,7 +3,7 @@
 const STATUS_RPC = "plugin:onani.hostname.status";
 const REFRESH_RPC = "plugin:onani.hostname.refresh";
 const PLUGIN_SHORT = "onani";
-const CURRENT_VERSION = "0.1.8";
+const CURRENT_VERSION = "0.2.1";
 const UPDATE_SOURCE_NAME = "Onani Updates";
 const UPDATE_SOURCE_URL = "https://github.com/XMZO/komari-plugin-onani/releases/latest/download/onani-update.json";
 const PLUGIN_MARKET_API = "/api/admin/plugin/market";
@@ -16,6 +16,7 @@ const elements = {
   error: document.getElementById("error"),
   updateError: document.getElementById("update-error"),
   progress: document.getElementById("progress"),
+  refreshSummary: document.getElementById("refresh-summary"),
   updateCard: document.getElementById("update-card"),
   updateCurrent: document.getElementById("update-current"),
   updateStatus: document.getElementById("update-status"),
@@ -402,7 +403,7 @@ async function checkForUpdates() {
 }
 
 async function refreshUpdatedAssets() {
-  const assets = ["./index.css", "./index.js"];
+  const assets = ["./index.css", "./index.js", "./background.js"];
   await Promise.allSettled(assets.map(async (asset) => {
     const response = await fetchWithDeadline(new URL(asset, window.location.href), {
       method: "GET",
@@ -588,6 +589,7 @@ function viewFingerprint(nodes, statuses, pluginStatus) {
       row.entry.collected_at || "",
       row.entry.last_attempt_at || "",
       row.entry.last_error || "",
+      row.entry.last_failure || null,
     ]),
   ]);
 }
@@ -614,7 +616,44 @@ function rowFingerprint(row) {
     row.entry.collected_at || "",
     row.entry.last_attempt_at || "",
     row.entry.last_error || "",
+    row.entry.last_failure || null,
   ]);
+}
+
+function failureText(row) {
+  const failure = recordOrEmpty(row.entry.last_failure);
+  const lines = [
+    `节点：${row.name}`,
+    `UUID：${row.uuid}`,
+    `原因：${row.entry.last_error || "未知错误"}`,
+    `失败阶段：${failure.stage || "旧记录未保存阶段"}`,
+    `发生时间：${formatTime(failure.at || row.entry.last_attempt_at)}`,
+    `任务 ID：${failure.task_id || "尚未下发任务或旧记录未保存"}`,
+  ];
+  if (Number.isInteger(failure.rpc_code)) lines.push(`RPC 错误码：${failure.rpc_code}`);
+  if (Number.isInteger(failure.exit_code)) lines.push(`退出码：${failure.exit_code}`);
+  if (typeof failure.output === "string" && failure.output) lines.push(`Agent 原始输出（最多 2048 字符）：\n${failure.output}`);
+  if (!row.entry.last_failure) lines.push("重新刷新可记录更完整的任务信息。");
+  return lines.join("\n");
+}
+
+function failureDetails(row) {
+  const details = document.createElement("details");
+  details.className = "failure-details";
+  details.append(textElement("summary", "", "错误详情"));
+  const diagnostic = failureText(row);
+  details.append(textElement("pre", "failure-output", diagnostic));
+  const copy = textElement("button", "button small", "复制排查信息");
+  copy.type = "button";
+  copy.addEventListener("click", async () => {
+    try {
+      if (!globalThis.navigator?.clipboard?.writeText) throw new Error("Clipboard unavailable");
+      await navigator.clipboard.writeText(diagnostic);
+      copy.textContent = "已复制";
+    } catch { copy.textContent = "无法自动复制，请选择上方文本复制"; }
+  });
+  details.append(copy);
+  return details;
 }
 
 function renderRow(row, taskState) {
@@ -633,7 +672,10 @@ function renderRow(row, taskState) {
   statusCell.append(cacheBadge(row.entry, row.cacheState));
   statusCell.append(document.createTextNode(" "));
   statusCell.append(textElement("span", row.online ? "badge online" : "badge", row.online ? "在线" : "离线"));
-  if (row.entry.last_error) statusCell.title = row.entry.last_error;
+  if (row.entry.last_error) {
+    statusCell.append(textElement("span", "failure-reason", row.entry.last_error));
+    statusCell.append(failureDetails(row));
+  }
   tableRow.append(statusCell);
 
   const timeCell = textElement("td", "muted", formatTime(row.entry.collected_at));
@@ -770,6 +812,16 @@ function renderCurrentView() {
 
   if (running) showNotice(elements.progress, refresh.message || "正在采集主机名");
   else hideNotice(elements.progress);
+  elements.refreshSummary.hidden = running || !refresh.finished_at;
+  if (!elements.refreshSummary.hidden) {
+    elements.refreshSummary.textContent = refresh.message || "刷新已结束";
+    if (Number(refresh.failed) > 0) {
+      elements.refreshSummary.textContent += "。失败原因已显示在对应节点行，可展开错误详情并复制任务信息。";
+      elements.refreshSummary.classList.add("has-failures");
+    } else {
+      elements.refreshSummary.classList.remove("has-failures");
+    }
+  }
 
   reconcileRows(rows, visibleRows, activeUuids, queuedUuids);
   renderEmptyState(rows.length, visibleRows.length, hasFilters);
