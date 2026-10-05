@@ -9,7 +9,7 @@
     "zh-CN": "Komari 工具箱：节点主机名缓存、旧版 Agent 任务回传兼容、可选背景代理及原尺寸 WebP 背景与原图下载。",
     "en": "Komari toolbox with hostname caching, legacy agent task-result compatibility and optional background proxy, full-resolution WebP backgrounds and original downloads."
   },
-  "version": "0.2.2",
+  "version": "0.2.3",
   "entry": "script.js",
   "author": "XMZO",
   "url": "https://github.com/XMZO/komari-plugin-onani",

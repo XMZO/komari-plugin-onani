@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   DEFAULT_CACHE_DAYS,
+  FALLBACK_HOSTNAME_COMMAND,
+  HOSTNAME_COMMAND,
   safeResultOutput,
   safeErrorText,
   normalizeHostname,
@@ -10,6 +12,7 @@ import {
   normalizeUuidList,
   resolveHostnameConfig,
   shouldRefreshHostname,
+  shouldUseHostnameFallback,
 } from "../src/features/hostname/core";
 
 test("configuration uses safe defaults and clamps invalid cache lifetimes", () => {
@@ -84,4 +87,14 @@ test("failure diagnostics survive cache reload with bounded output and real erro
   assert.equal(safeResultOutput("\u001b[31mfailed\u001b[0m\nreason\u0000"), "failed\nreason");
   assert.equal(safeResultOutput("x".repeat(3000)).length, 2048);
   assert.equal(safeErrorText({ code: -32000, message: "RPC unavailable" }), "RPC unavailable");
+});
+
+test("only a missing primary command on a POSIX shell falls back to uname -n", () => {
+  assert.equal(HOSTNAME_COMMAND, "hostname");
+  assert.equal(FALLBACK_HOSTNAME_COMMAND, "uname -n");
+  assert.equal(shouldUseHostnameFallback(HOSTNAME_COMMAND, 127), true);
+  // Remote control disabled, PowerShell "not recognized" and other failures keep their own error.
+  for (const exitCode of [0, 1, -1, 126]) assert.equal(shouldUseHostnameFallback(HOSTNAME_COMMAND, exitCode), false);
+  // The fallback never chains into itself.
+  assert.equal(shouldUseHostnameFallback(FALLBACK_HOSTNAME_COMMAND, 127), false);
 });

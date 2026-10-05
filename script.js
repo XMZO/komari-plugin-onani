@@ -578,6 +578,9 @@
   var MIN_CACHE_DAYS = 1;
   var MAX_CACHE_DAYS = 3650;
   var RETRY_BACKOFF_MS = 24 * 60 * 60 * 1e3;
+  var HOSTNAME_COMMAND = "hostname";
+  var FALLBACK_HOSTNAME_COMMAND = "uname -n";
+  var COMMAND_NOT_FOUND_EXIT_CODE = 127;
   var UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   var FORBIDDEN_HOSTNAME_CHARACTER = /[\s/\\:<>"'`]/u;
   function normalizeFailure(value) {
@@ -665,6 +668,9 @@
     }
     return cache;
   }
+  function shouldUseHostnameFallback(command, exitCode) {
+    return command === HOSTNAME_COMMAND && exitCode === COMMAND_NOT_FOUND_EXIT_CODE;
+  }
   function shouldRefreshHostname(entry, nowMs, cacheTtlMs, retryBackoffMs = RETRY_BACKOFF_MS) {
     if (entry?.hostname && entry.collected_at) {
       const collectedAt = Date.parse(entry.collected_at);
@@ -712,7 +718,6 @@
   // src/features/hostname/index.ts
   var STATUS_RPC = "plugin:onani.hostname.status";
   var REFRESH_RPC = "plugin:onani.hostname.refresh";
-  var HOSTNAME_COMMAND = "hostname";
   var AUTO_SCAN_EXPRESSION = "@every 6h";
   var STARTUP_SCAN_DELAY_MS = 2e4;
   var RESULT_POLL_INTERVAL_MS = 1e3;
@@ -1049,31 +1054,40 @@
         this.cache.entries[uuid] = { ...previous, last_attempt_at: attemptedAt, last_error: void 0, last_failure: void 0 };
       }
       this.persistCache();
+      const missingCommand = await this.runHostnameCommand(job, targets, HOSTNAME_COMMAND);
+      if (missingCommand.length > 0) {
+        await this.runHostnameCommand(job, missingCommand, FALLBACK_HOSTNAME_COMMAND);
+      }
+      this.persistCache();
+    }
+    // Dispatches one fixed command and collects its results. Returns the nodes whose shell
+    // reported the primary command as missing; they stay active for the fallback command.
+    async runHostnameCommand(job, targets, command) {
       let execResponse;
-      job.stage = "\u4E0B\u53D1 hostname \u547D\u4EE4";
+      job.stage = `\u4E0B\u53D1 ${command} \u547D\u4EE4`;
       try {
         execResponse = await this.callWithJobTimeout(
           job,
-          "\u4E0B\u53D1 hostname \u547D\u4EE4",
+          `\u4E0B\u53D1 ${command} \u547D\u4EE4`,
           EXEC_RPC_TIMEOUT_MS,
           () => import_plugin_sdk.server.call("admin:exec", {
-            command: HOSTNAME_COMMAND,
+            command,
             clients: targets
           })
         );
       } catch (error) {
-        const message = `\u65E0\u6CD5\u4E0B\u53D1\u56FA\u5B9A hostname \u547D\u4EE4\uFF1A${safeErrorText(error)}`;
+        const message = `\u65E0\u6CD5\u4E0B\u53D1\u56FA\u5B9A ${command} \u547D\u4EE4\uFF1A${safeErrorText(error)}`;
         this.markFailed(targets, message, { stage: job.stage, rpc_code: rpcErrorCode(error) ?? void 0 });
         this.releaseActive(job, targets);
         this.persistCache();
-        return;
+        return [];
       }
       const taskId = typeof execResponse.task_id === "string" ? execResponse.task_id : "";
       if (!taskId) {
         this.markFailed(targets, "Komari \u672A\u8FD4\u56DE\u8FDC\u7A0B\u4EFB\u52A1 ID", { stage: job.stage });
         this.releaseActive(job, targets);
         this.persistCache();
-        return;
+        return [];
       }
       job.taskId = taskId;
       const targetSet = new Set(targets);
@@ -1085,11 +1099,11 @@
         this.markFailed(rejected, "Komari \u672A\u5C06\u8282\u70B9\u5217\u5165\u5DF2\u63A5\u53D7\u6216\u5DF2\u6392\u961F\u5217\u8868\uFF0C\u8BF7\u68C0\u67E5\u8282\u70B9\u8FDE\u63A5\u4E0E\u670D\u52A1\u7AEF\u4EFB\u52A1\u65E5\u5FD7", { stage: job.stage, task_id: taskId });
         this.releaseActive(job, rejected);
       }
-      await this.collectTaskResults(job, taskId, [...accepted]);
-      this.persistCache();
+      return this.collectTaskResults(job, taskId, [...accepted], command);
     }
-    async collectTaskResults(job, taskId, targets) {
+    async collectTaskResults(job, taskId, targets, command) {
       const pending = new Set(targets);
+      const missingCommand = [];
       job.stage = "\u7B49\u5F85 Agent \u8FD4\u56DE\u7ED3\u679C";
       const resultDeadline = Math.min(job.deadlineAt, Date.now() + RESULT_POLL_TIMEOUT_MS);
       let consecutiveErrors = 0;
@@ -1139,10 +1153,14 @@
               };
               this.refresh.succeeded += 1;
             } else {
-              this.markFailed([uuid], normalized.error, { stage: "\u89E3\u6790 hostname \u8F93\u51FA", task_id: taskId, exit_code: result.exit_code, output: safeResultOutput(result.result) });
+              this.markFailed([uuid], normalized.error, { stage: `\u89E3\u6790 ${command} \u8F93\u51FA`, task_id: taskId, exit_code: result.exit_code, output: safeResultOutput(result.result) });
             }
+          } else if (shouldUseHostnameFallback(command, result.exit_code)) {
+            missingCommand.push(uuid);
+            continue;
           } else {
-            this.markFailed([uuid], `Agent \u8FD4\u56DE\u9000\u51FA\u7801 ${result.exit_code}\uFF1A${safeErrorText(result.result, "\u672A\u8FD4\u56DE\u9519\u8BEF\u8F93\u51FA")}`, { stage: "Agent \u6267\u884C hostname", task_id: taskId, exit_code: result.exit_code, output: safeResultOutput(result.result) });
+            const fallbackNote = command === HOSTNAME_COMMAND ? "" : `\u7CFB\u7EDF\u6CA1\u6709 ${HOSTNAME_COMMAND} \u547D\u4EE4\uFF1B\u6539\u7528 ${command} \u540E\uFF0C`;
+            this.markFailed([uuid], `${fallbackNote}Agent \u8FD4\u56DE\u9000\u51FA\u7801 ${result.exit_code}\uFF1A${safeErrorText(result.result, "\u672A\u8FD4\u56DE\u9519\u8BEF\u8F93\u51FA")}`, { stage: `Agent \u6267\u884C ${command}`, task_id: taskId, exit_code: result.exit_code, output: safeResultOutput(result.result) });
           }
           this.releaseActive(job, [uuid]);
         }
@@ -1157,6 +1175,7 @@
         this.markFailed([...pending], `${message}\uFF1B\u5C1A\u672A\u6536\u5230\u7ED3\u679C\uFF0C\u65E0\u6CD5\u4EC5\u51ED\u8D85\u65F6\u5224\u65AD Agent \u662F\u5426\u7981\u7528\u4E86\u8FDC\u63A7`, { stage: job.stage, task_id: taskId });
         this.releaseActive(job, [...pending]);
       }
+      return missingCommand;
     }
     releaseActive(job, uuids) {
       for (const uuid of uuids) {

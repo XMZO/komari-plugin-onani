@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -198,14 +199,39 @@ func TestOnaniHostnameRuntime(t *testing.T) {
 	register("common:getNodesLatestStatus", func(context.Context, *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 		return map[string]any{uuid: map[string]any{"online": true}}, nil
 	})
-	register("admin:exec", func(context.Context, *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	var commandsMu sync.Mutex
+	var commands []string
+	register("admin:exec", func(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+		var params struct {
+			Command string `json:"command"`
+		}
+		_ = req.BindParams(&params)
+		commandsMu.Lock()
+		commands = append(commands, params.Command)
+		commandsMu.Unlock()
 		if scenario.Load() == 3 {
 			return nil, &rpc.JsonRpcError{Code: -32001, Message: "dispatch fixture rejected"}
 		}
+		if params.Command == "uname -n" {
+			return map[string]any{"task_id": "fallback-task-456", "clients": []string{uuid}}, nil
+		}
 		return map[string]any{"task_id": "diagnostic-task-123", "clients": []string{uuid}}, nil
 	})
-	register("admin:getTaskResultsByTaskId", func(context.Context, *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	register("admin:getTaskResultsByTaskId", func(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+		var params struct {
+			TaskID string `json:"task_id"`
+		}
+		_ = req.BindParams(&params)
 		switch scenario.Load() {
+		case 7, 8:
+			// BusyBox without the hostname applet: sh reports 127, uname -n works unless scenario 8.
+			if params.TaskID != "fallback-task-456" {
+				return []any{map[string]any{"client": uuid, "exit_code": 127, "result": "sh: hostname: not found"}}, nil
+			}
+			if scenario.Load() == 8 {
+				return []any{map[string]any{"client": uuid, "exit_code": 127, "result": "sh: uname: not found"}}, nil
+			}
+			return []any{map[string]any{"client": uuid, "exit_code": 0, "result": "fixture-busybox\n"}}, nil
 		case 1:
 			return []any{map[string]any{"client": uuid, "exit_code": -1, "result": "Remote control is disabled."}}, nil
 		case 2:
@@ -240,17 +266,24 @@ func TestOnaniHostnameRuntime(t *testing.T) {
 		id                    int32
 		name, contains, stage string
 		rpcCode, exitCode     int
+		taskID, output        string
+		commands              string
 	}{
-		{1, "agent failure", "Remote control is disabled.", "Agent 执行 hostname", 0, -1},
-		{2, "empty hostname", "空主机名", "解析 hostname 输出", 0, 0},
-		{3, "dispatch failure", "dispatch fixture rejected", "下发 hostname 命令", -32001, 0},
-		{4, "query failure", "results fixture unavailable", "查询远程任务结果", -32002, 0},
-		{5, "agent timeout", "尚未收到结果", "等待 Agent 返回结果", 0, 0},
-		{6, "recovery", "", "", 0, 0},
+		{1, "agent failure", "Remote control is disabled.", "Agent 执行 hostname", 0, -1, "diagnostic-task-123", "Remote control is disabled.", "hostname"},
+		{2, "empty hostname", "空主机名", "解析 hostname 输出", 0, 0, "diagnostic-task-123", "", "hostname"},
+		{3, "dispatch failure", "dispatch fixture rejected", "下发 hostname 命令", -32001, 0, "", "", "hostname"},
+		{4, "query failure", "results fixture unavailable", "查询远程任务结果", -32002, 0, "diagnostic-task-123", "", "hostname"},
+		{5, "agent timeout", "尚未收到结果", "等待 Agent 返回结果", 0, 0, "diagnostic-task-123", "", "hostname"},
+		{6, "recovery", "", "", 0, 0, "", "", "hostname"},
+		{7, "busybox fallback", "", "", 0, 0, "", "", "hostname,uname -n"},
+		{8, "fallback failure", "系统没有 hostname 命令；改用 uname -n 后，Agent 返回退出码 127", "Agent 执行 uname -n", 0, 127, "fallback-task-456", "sh: uname: not found", "hostname,uname -n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			scenario.Store(tc.id)
+			commandsMu.Lock()
+			commands = nil
+			commandsMu.Unlock()
 			call("plugin:onani.hostname.refresh", map[string]any{"force": true, "uuids": []string{uuid}})
 			deadline := time.Now().Add(35 * time.Second)
 			var state map[string]any
@@ -265,8 +298,15 @@ func TestOnaniHostnameRuntime(t *testing.T) {
 				time.Sleep(25 * time.Millisecond)
 			}
 			entry := state["entries"].(map[string]any)[uuid].(map[string]any)
-			if tc.id == 6 {
-				if entry["hostname"] != "fixture-host" || entry["last_failure"] != nil || entry["last_error"] != nil {
+			commandsMu.Lock()
+			sent := strings.Join(commands, ",")
+			commandsMu.Unlock()
+			if sent != tc.commands {
+				t.Fatalf("commands sent=%q want %q", sent, tc.commands)
+			}
+			if tc.id == 6 || tc.id == 7 {
+				want := map[int32]string{6: "fixture-host", 7: "fixture-busybox"}[tc.id]
+				if entry["hostname"] != want || entry["last_failure"] != nil || entry["last_error"] != nil {
 					t.Fatalf("recovery: %+v", entry)
 				}
 				return
@@ -278,17 +318,20 @@ func TestOnaniHostnameRuntime(t *testing.T) {
 			if !ok || details["stage"] != tc.stage || details["at"] == nil {
 				t.Fatalf("missing diagnostics: %+v", entry)
 			}
-			if tc.id != 3 && details["task_id"] != "diagnostic-task-123" {
+			if tc.taskID != "" && details["task_id"] != tc.taskID {
 				t.Fatalf("missing task: %+v", details)
 			}
 			if tc.rpcCode != 0 && details["rpc_code"] != float64(tc.rpcCode) {
 				t.Fatalf("missing RPC code: %+v", details)
 			}
-			if tc.id <= 2 && details["exit_code"] != float64(tc.exitCode) {
+			if (tc.id <= 2 || tc.id == 8) && details["exit_code"] != float64(tc.exitCode) {
 				t.Fatalf("missing exit code: %+v", details)
 			}
-			if tc.id == 1 && details["output"] != "Remote control is disabled." {
+			if tc.output != "" && details["output"] != tc.output {
 				t.Fatalf("missing output: %+v", details)
+			}
+			if tc.id == 8 && entry["hostname"] != "fixture-busybox" {
+				t.Fatalf("failed fallback dropped the last good hostname: %+v", entry)
 			}
 			raw, err := os.ReadFile(filepath.Join(StorageDir, "onani", "hostname-cache.json"))
 			if err != nil || !bytes.Contains(raw, []byte(tc.contains)) {

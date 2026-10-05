@@ -3,6 +3,10 @@ export const DEFAULT_CACHE_DAYS = 30;
 export const MIN_CACHE_DAYS = 1;
 export const MAX_CACHE_DAYS = 3650;
 export const RETRY_BACKOFF_MS = 24 * 60 * 60 * 1000;
+export const HOSTNAME_COMMAND = "hostname";
+// Minimal BusyBox builds (OpenWrt/ImmortalWrt) often omit the hostname applet but keep uname.
+export const FALLBACK_HOSTNAME_COMMAND = "uname -n";
+const COMMAND_NOT_FOUND_EXIT_CODE = 127;
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const FORBIDDEN_HOSTNAME_CHARACTER = /[\s/\\:<>"'`]/u;
@@ -141,6 +145,12 @@ export function normalizeHostnameCache(value: unknown): HostnameCache {
     if (entry) cache.entries[uuid.toLowerCase()] = entry;
   }
   return cache;
+}
+
+// Only a POSIX shell's "command not found" for the primary command triggers the fallback;
+// Windows agents run PowerShell, which never reports 127 for a missing command.
+export function shouldUseHostnameFallback(command: string, exitCode: number): boolean {
+  return command === HOSTNAME_COMMAND && exitCode === COMMAND_NOT_FOUND_EXIT_CODE;
 }
 
 export function shouldRefreshHostname(

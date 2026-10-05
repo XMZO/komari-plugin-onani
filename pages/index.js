@@ -3,7 +3,7 @@
 const STATUS_RPC = "plugin:onani.hostname.status";
 const REFRESH_RPC = "plugin:onani.hostname.refresh";
 const PLUGIN_SHORT = "onani";
-const CURRENT_VERSION = "0.2.2";
+const CURRENT_VERSION = "0.2.3";
 const UPDATE_SOURCE_NAME = "Onani Updates";
 const UPDATE_SOURCE_URL = "https://github.com/XMZO/komari-plugin-onani/releases/latest/download/onani-update.json";
 const PLUGIN_MARKET_API = "/api/admin/plugin/market";
@@ -928,7 +928,7 @@ elements.refreshDue.addEventListener("click", () => void startRefresh({ force: f
 elements.forceAll.addEventListener("click", async () => {
   const approved = await requestConfirmation({
     title: "强制刷新全部在线节点",
-    message: "将对每个在线节点执行一次固定命令 hostname。正在运行或排队的节点不会重复加入。",
+    message: "将对每个在线节点执行一次固定命令 hostname（系统没有该命令时改用 uname -n）。正在运行或排队的节点不会重复加入。",
     confirmLabel: "开始刷新",
   });
   if (approved) void startRefresh({ force: true });

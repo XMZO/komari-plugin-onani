@@ -29,6 +29,7 @@ Komari 1.5 移除 v1 协议时一并删除了 `POST /api/clients/task/result`，
 ## 当前功能
 
 - 仅对 Komari 判定为在线的节点执行固定命令 `hostname`
+- OpenWrt/ImmortalWrt 等精简 BusyBox 系统不带 `hostname` 时（shell 返回退出码 127），在同一作业内自动对这些节点改用 `uname -n`，取到的是同一个内核主机名；Windows 节点不受影响
 - 默认缓存 30 天，缓存有效期内不会重复执行命令
 - 自动扫描每 6 小时；扫描只检查状态，只有缺失或过期项才会下发命令
 - 失败节点至少退避 24 小时，避免反复请求不支持远程控制的 Agent
@@ -58,7 +59,7 @@ Komari 1.5 移除 v1 协议时一并删除了 `POST /api/clients/task/result`，
 - `allowAllFileAccess`（访问插件目录以外的文件）
 - `allowListen` 或 HTML 全局注入
 
-远程命令是源码中的固定字面量 `hostname`，节点 UUID 只作为 RPC 参数传递，不能拼接或替换命令。Agent 禁用远程控制时会记录失败并进入退避，不会绕过 Agent 设置。
+远程命令是源码中的固定字面量 `hostname`，以及仅在其不存在时使用的 `uname -n`；节点 UUID 只作为 RPC 参数传递，不能拼接或替换命令。Agent 禁用远程控制时会记录失败并进入退避，不会绕过 Agent 设置。
 
 ## 自有更新源
 
@@ -101,7 +102,7 @@ pnpm run pack
 pnpm run release:metadata
 ```
 
-可选运行 `pnpm run verify:runtime ../komari`，在指定 Komari 源码的测试运行时验证真实插件加载、图片处理程序、预览、原图逐字节下载、过期 410 和关闭开关，并验证主机名采集的 Agent 错误、空输出、RPC 错误、超时及恢复，以及旧版 Agent 任务回传经真实 v2 接口写入数据库、错误 Token 被拒绝和非法请求体原样返回 404。该检查只使用内存数据库及临时插件目录，会联网读取一张固定测试图片，不接触线上安装。
+可选运行 `pnpm run verify:runtime ../komari`，在指定 Komari 源码的测试运行时验证真实插件加载、图片处理程序、预览、原图逐字节下载、过期 410 和关闭开关，并验证主机名采集的 Agent 错误、空输出、RPC 错误、超时、恢复及 BusyBox 缺少 `hostname` 时改用 `uname -n`，以及旧版 Agent 任务回传经真实 v2 接口写入数据库、错误 Token 被拒绝和非法请求体原样返回 404。该检查只使用内存数据库及临时插件目录，会联网读取一张固定测试图片，不接触线上安装。
 
 `pnpm run pack` 会先安全清空项目内的 `dist/`，再生成当前版本 ZIP，因此本地不会持续堆积旧包；`pnpm run release:metadata` 随后生成 `onani-update.json`。推送与 manifest 版本一致的 `v*` 标签后，Release 工作流会验证、重新构建并上传这两个资产，重复执行会覆盖同名资产而不会制造副本。
 

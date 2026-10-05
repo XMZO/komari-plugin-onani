@@ -5,6 +5,8 @@ import { BoundedJobQueue } from "../../shared/bounded-job-queue";
 import { isOperationTimeout, OperationTimeoutError, withTimeout } from "../../shared/async-timeout";
 import {
   emptyHostnameCache,
+  FALLBACK_HOSTNAME_COMMAND,
+  HOSTNAME_COMMAND,
   isRecord,
   isUuid,
   normalizeHostname,
@@ -14,6 +16,7 @@ import {
   safeErrorText,
   safeResultOutput,
   shouldRefreshHostname,
+  shouldUseHostnameFallback,
   type HostnameCache,
   type HostnameCacheEntry,
   type HostnameConfig,
@@ -23,7 +26,6 @@ import {
 
 const STATUS_RPC = "plugin:onani.hostname.status";
 const REFRESH_RPC = "plugin:onani.hostname.refresh";
-const HOSTNAME_COMMAND = "hostname";
 const AUTO_SCAN_EXPRESSION = "@every 6h";
 const STARTUP_SCAN_DELAY_MS = 20_000;
 const RESULT_POLL_INTERVAL_MS = 1_000;
@@ -463,24 +465,34 @@ class HostnameFeature {
     }
     this.persistCache();
 
+    const missingCommand = await this.runHostnameCommand(job, targets, HOSTNAME_COMMAND);
+    if (missingCommand.length > 0) {
+      await this.runHostnameCommand(job, missingCommand, FALLBACK_HOSTNAME_COMMAND);
+    }
+    this.persistCache();
+  }
+
+  // Dispatches one fixed command and collects its results. Returns the nodes whose shell
+  // reported the primary command as missing; they stay active for the fallback command.
+  private async runHostnameCommand(job: RefreshJob, targets: string[], command: string): Promise<string[]> {
     let execResponse: ExecResponse;
-    job.stage = "下发 hostname 命令";
+    job.stage = `下发 ${command} 命令`;
     try {
       execResponse = await this.callWithJobTimeout(
         job,
-        "下发 hostname 命令",
+        `下发 ${command} 命令`,
         EXEC_RPC_TIMEOUT_MS,
         () => server.call<ExecResponse>("admin:exec", {
-          command: HOSTNAME_COMMAND,
+          command,
           clients: targets,
         }),
       );
     } catch (error) {
-      const message = `无法下发固定 hostname 命令：${safeErrorText(error)}`;
+      const message = `无法下发固定 ${command} 命令：${safeErrorText(error)}`;
       this.markFailed(targets, message, { stage: job.stage, rpc_code: rpcErrorCode(error) ?? undefined });
       this.releaseActive(job, targets);
       this.persistCache();
-      return;
+      return [];
     }
 
     const taskId = typeof execResponse.task_id === "string" ? execResponse.task_id : "";
@@ -488,7 +500,7 @@ class HostnameFeature {
       this.markFailed(targets, "Komari 未返回远程任务 ID", { stage: job.stage });
       this.releaseActive(job, targets);
       this.persistCache();
-      return;
+      return [];
     }
 
     job.taskId = taskId;
@@ -502,12 +514,12 @@ class HostnameFeature {
       this.markFailed(rejected, "Komari 未将节点列入已接受或已排队列表，请检查节点连接与服务端任务日志", { stage: job.stage, task_id: taskId });
       this.releaseActive(job, rejected);
     }
-    await this.collectTaskResults(job, taskId, [...accepted]);
-    this.persistCache();
+    return this.collectTaskResults(job, taskId, [...accepted], command);
   }
 
-  private async collectTaskResults(job: RefreshJob, taskId: string, targets: string[]): Promise<void> {
+  private async collectTaskResults(job: RefreshJob, taskId: string, targets: string[], command: string): Promise<string[]> {
     const pending = new Set(targets);
+    const missingCommand: string[] = [];
     job.stage = "等待 Agent 返回结果";
     const resultDeadline = Math.min(job.deadlineAt, Date.now() + RESULT_POLL_TIMEOUT_MS);
     let consecutiveErrors = 0;
@@ -563,10 +575,14 @@ class HostnameFeature {
             };
             this.refresh.succeeded += 1;
           } else {
-            this.markFailed([uuid], normalized.error, { stage: "解析 hostname 输出", task_id: taskId, exit_code: result.exit_code, output: safeResultOutput(result.result) });
+            this.markFailed([uuid], normalized.error, { stage: `解析 ${command} 输出`, task_id: taskId, exit_code: result.exit_code, output: safeResultOutput(result.result) });
           }
+        } else if (shouldUseHostnameFallback(command, result.exit_code)) {
+          missingCommand.push(uuid);
+          continue;
         } else {
-          this.markFailed([uuid], `Agent 返回退出码 ${result.exit_code}：${safeErrorText(result.result, "未返回错误输出")}`, { stage: "Agent 执行 hostname", task_id: taskId, exit_code: result.exit_code, output: safeResultOutput(result.result) });
+          const fallbackNote = command === HOSTNAME_COMMAND ? "" : `系统没有 ${HOSTNAME_COMMAND} 命令；改用 ${command} 后，`;
+          this.markFailed([uuid], `${fallbackNote}Agent 返回退出码 ${result.exit_code}：${safeErrorText(result.result, "未返回错误输出")}`, { stage: `Agent 执行 ${command}`, task_id: taskId, exit_code: result.exit_code, output: safeResultOutput(result.result) });
         }
         this.releaseActive(job, [uuid]);
       }
@@ -584,6 +600,7 @@ class HostnameFeature {
       this.markFailed([...pending], `${message}；尚未收到结果，无法仅凭超时判断 Agent 是否禁用了远控`, { stage: job.stage, task_id: taskId });
       this.releaseActive(job, [...pending]);
     }
+    return missingCommand;
   }
 
   private releaseActive(job: RefreshJob, uuids: string[]): void {
