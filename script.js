@@ -439,7 +439,7 @@
   });
 
   // src/plugin.ts
-  var import_plugin_sdk3 = __toESM(require_src());
+  var import_plugin_sdk4 = __toESM(require_src());
 
   // src/features/hostname/index.ts
   var import_plugin_sdk = __toESM(require_src());
@@ -1497,9 +1497,103 @@
     new BackgroundFeature().load();
   }
 
-  // src/plugin.ts
-  (0, import_plugin_sdk3.definePlugin)({
+  // src/features/agent-compat/index.ts
+  var import_plugin_sdk3 = __toESM(require_src());
+
+  // src/features/agent-compat/core.ts
+  var LEGACY_TASK_RESULT_PATH = "/api/clients/task/result";
+  var LEGACY_TASK_RESULT_MATCHER = `POST ${LEGACY_TASK_RESULT_PATH}`;
+  var V2_RPC_PATH = "/api/clients/v2/rpc";
+  var V2_TASK_RESULT_METHOD = "agent.taskResult";
+  var V2_TASK_RESULT_ID = "onani-legacy-task-result";
+  var MAX_LEGACY_BODY_CHARS = 8 * 1024 * 1024;
+  var MAX_TASK_ID_LENGTH = 256;
+  var RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+  function isRecord2(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function normalizeFinishedAt(value) {
+    if (typeof value !== "string" || !RFC3339.test(value)) return void 0;
+    const time = Date.parse(value);
+    if (!Number.isFinite(time) || time < 0 || time >= Date.UTC(1e4, 0, 1)) return void 0;
+    return new Date(time).toISOString();
+  }
+  function rewriteLegacyTaskResult(requestUri, body) {
+    const queryAt = requestUri.indexOf("?");
+    const path3 = queryAt === -1 ? requestUri : requestUri.slice(0, queryAt);
+    if (path3.toLowerCase() !== LEGACY_TASK_RESULT_PATH) return { ok: false, reason: "\u8BF7\u6C42\u8DEF\u5F84\u4E0D\u662F\u65E7\u7248\u4EFB\u52A1\u56DE\u4F20\u63A5\u53E3" };
+    if (body.length > MAX_LEGACY_BODY_CHARS) return { ok: false, reason: "\u8BF7\u6C42\u4F53\u8D85\u8FC7 8 MiB" };
+    let payload;
+    try {
+      payload = JSON.parse(body);
+    } catch {
+      return { ok: false, reason: "\u8BF7\u6C42\u4F53\u4E0D\u662F JSON" };
+    }
+    if (!isRecord2(payload)) return { ok: false, reason: "\u8BF7\u6C42\u4F53\u4E0D\u662F JSON \u5BF9\u8C61" };
+    const { task_id: taskId, result, exit_code: exitCode } = payload;
+    if (typeof taskId !== "string" || taskId.length === 0 || taskId.length > MAX_TASK_ID_LENGTH) {
+      return { ok: false, reason: "task_id \u65E0\u6548" };
+    }
+    if (result !== void 0 && typeof result !== "string") return { ok: false, reason: "result \u4E0D\u662F\u5B57\u7B26\u4E32" };
+    if (exitCode !== void 0 && !Number.isSafeInteger(exitCode)) return { ok: false, reason: "exit_code \u4E0D\u662F\u6574\u6570" };
+    const params = { task_id: taskId, result: result ?? "", exit_code: exitCode ?? 0 };
+    const finishedAt = normalizeFinishedAt(payload.finished_at);
+    if (finishedAt) params.finished_at = finishedAt;
+    return {
+      ok: true,
+      url: V2_RPC_PATH + (queryAt === -1 ? "" : requestUri.slice(queryAt)),
+      body: JSON.stringify({ jsonrpc: "2.0", method: V2_TASK_RESULT_METHOD, params, id: V2_TASK_RESULT_ID })
+    };
+  }
+
+  // src/features/agent-compat/index.ts
+  var WARNING_INTERVAL_MS = 6e4;
+  var AgentCompatFeature = class {
+    constructor() {
+      this.lastWarningAt = 0;
+      this.suppressedWarnings = 0;
+    }
     load() {
+      import_plugin_sdk3.server.hook("request", LEGACY_TASK_RESULT_MATCHER, (req) => this.rewrite(req));
+    }
+    rewrite(req) {
+      const rewrite = rewriteLegacyTaskResult(
+        typeof req.url === "string" ? req.url : "",
+        typeof req.body === "string" ? req.body : ""
+      );
+      if (!rewrite.ok) {
+        this.warn(rewrite.reason);
+        return;
+      }
+      req.url = rewrite.url;
+      req.body = rewrite.body;
+      const headers = { ...req.headers ?? {} };
+      delete headers["content-encoding"];
+      delete headers["content-length"];
+      headers["content-type"] = "application/json";
+      req.headers = headers;
+    }
+    // The legacy path is reachable without a token, so keep junk requests from flooding the log.
+    warn(reason) {
+      const now = Date.now();
+      if (now - this.lastWarningAt < WARNING_INTERVAL_MS) {
+        this.suppressedWarnings += 1;
+        return;
+      }
+      const suppressed = this.suppressedWarnings > 0 ? `\uFF1B\u6B64\u524D 60 \u79D2\u5185\u53E6\u6709 ${this.suppressedWarnings} \u6B21\u5DF2\u7701\u7565` : "";
+      this.lastWarningAt = now;
+      this.suppressedWarnings = 0;
+      console.warn(`[onani] \u65E7\u7248 Agent \u4EFB\u52A1\u56DE\u4F20\u672A\u8F6C\u6362\uFF1A${reason}${suppressed}`);
+    }
+  };
+  function registerAgentCompatFeature() {
+    new AgentCompatFeature().load();
+  }
+
+  // src/plugin.ts
+  (0, import_plugin_sdk4.definePlugin)({
+    load() {
+      registerAgentCompatFeature();
       registerHostnameFeature();
       registerBackgroundFeature();
     }

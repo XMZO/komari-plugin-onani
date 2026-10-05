@@ -1,6 +1,14 @@
 # Onani Toolbox
 
-一个可扩展的 Komari 插件工具箱，提供节点主机名采集与缓存，以及可选的同域背景图片代理。
+一个可扩展的 Komari 插件工具箱，提供节点主机名采集与缓存、旧版 Agent 任务回传兼容，以及可选的同域背景图片代理。
+
+## 旧版 Agent 任务回传兼容
+
+Komari 1.5 移除 v1 协议时一并删除了 `POST /api/clients/task/result`，执行结果只能通过 v2 JSON-RPC `agent.taskResult` 提交。[komari-zig-agent](https://github.com/luodaoyi/komari-zig-agent)（至少到 v0.1.52）的状态上报和 Ping 已经使用 v2，但命令结果仍固定提交到旧接口并收到 404。表现为节点在线、命令已经下发，却始终等不到结果：主机名采集和 Komari 自带的远程执行都会超时。
+
+插件注册一个只匹配 `POST /api/clients/task/result` 的请求钩子，在路由前把旧版请求体 `{task_id, result, exit_code, finished_at}` 改写为发往 `/api/clients/v2/rpc` 的 `agent.taskResult` 调用。原始查询参数和请求头保持不变，Token 仍由 Komari 自己鉴权，节点只能写入自己的任务结果。字段与默认值与被删除的 v1 接口一致；`finished_at` 只有能规范为 RFC3339 时才转发，否则由服务器记录当前时间。
+
+钩子在鉴权前运行，因此超过 8 MiB 或格式不对的请求会原样放行，依旧由 Komari 返回 404，并且每分钟最多记录一条插件日志。已经改用 v2 回传的 Agent 不会再请求旧路径，钩子也就不会触发。该功能无须配置，插件停用后自动失效。新增的 `allowHooks` 权限需要在升级时由 Komari 管理员重新批准。
 
 ## 背景代理与原图下载
 
@@ -45,9 +53,8 @@
 
 ## 安全边界
 
-插件声明 `allowSystemRPC` 处理主机名功能、`allowRoutes` 提供背景接口、`allowExec` 运行随包附带的图片处理程序。背景接口不会暴露主机名及管理员 RPC。它不会申请：
+插件声明 `allowSystemRPC` 处理主机名功能、`allowRoutes` 提供背景接口、`allowHooks` 转换旧版 Agent 任务回传、`allowExec` 运行随包附带的图片处理程序。背景接口不会暴露主机名及管理员 RPC。请求钩子只匹配 `POST /api/clients/task/result` 这一条路径，不拦截其他请求、响应或 WebSocket，也不读取或保存 Token。它不会申请：
 
-- `allowHooks`（拦截请求或 WebSocket）
 - `allowAllFileAccess`（访问插件目录以外的文件）
 - `allowListen` 或 HTML 全局注入
 
@@ -71,6 +78,7 @@ https://github.com/XMZO/komari-plugin-onani/releases/latest/download/onani-updat
 src/plugin.ts                    插件入口，只负责装载功能模块
 src/features/hostname/           主机名功能及可独立测试的纯逻辑
 src/features/background/         背景代理路由、开关与固定原图下载
+src/features/agent-compat/       旧版 Agent 任务回传到 v2 JSON-RPC 的请求改写
 helper/                         原图获取、WebP 转码、缓存和测试（Go）
 bin/                            构建生成的跨平台处理程序与依赖许可证
 src/shared/json-store.ts         可供未来功能复用的受限 JSON 存储
@@ -93,7 +101,7 @@ pnpm run pack
 pnpm run release:metadata
 ```
 
-可选运行 `pnpm run verify:runtime ../komari`，在指定 Komari 源码的测试运行时验证真实插件加载、图片处理程序、预览、原图逐字节下载、过期 410 和关闭开关，并验证主机名采集的 Agent 错误、空输出、RPC 错误、超时及恢复。该检查只使用内存数据库及临时插件目录，会联网读取一张固定测试图片，不接触线上安装。
+可选运行 `pnpm run verify:runtime ../komari`，在指定 Komari 源码的测试运行时验证真实插件加载、图片处理程序、预览、原图逐字节下载、过期 410 和关闭开关，并验证主机名采集的 Agent 错误、空输出、RPC 错误、超时及恢复，以及旧版 Agent 任务回传经真实 v2 接口写入数据库、错误 Token 被拒绝和非法请求体原样返回 404。该检查只使用内存数据库及临时插件目录，会联网读取一张固定测试图片，不接触线上安装。
 
 `pnpm run pack` 会先安全清空项目内的 `dist/`，再生成当前版本 ZIP，因此本地不会持续堆积旧包；`pnpm run release:metadata` 随后生成 `onani-update.json`。推送与 manifest 版本一致的 `v*` 标签后，Release 工作流会验证、重新构建并上传这两个资产，重复执行会覆盖同名资产而不会制造副本。
 

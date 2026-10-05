@@ -6,8 +6,8 @@
   },
   "short": "onani",
   "description": {
-    "zh-CN": "Komari 工具箱：节点主机名缓存、可选背景代理及 原尺寸 WebP 背景与原图下载。",
-    "en": "Komari toolbox with hostname caching and optional background proxy, full-resolution WebP backgrounds and original downloads."
+    "zh-CN": "Komari 工具箱：节点主机名缓存、旧版 Agent 任务回传兼容、可选背景代理及原尺寸 WebP 背景与原图下载。",
+    "en": "Komari toolbox with hostname caching, legacy agent task-result compatibility and optional background proxy, full-resolution WebP backgrounds and original downloads."
   },
   "version": "0.2.2",
   "entry": "script.js",
@@ -18,6 +18,7 @@
     "node": true,
     "allowSystemRPC": true,
     "allowRoutes": true,
+    "allowHooks": true,
     "allowExec": true,
     "maxHTTPBodyBytes": 20971520,
     "timeout": 40

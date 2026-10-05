@@ -7,6 +7,7 @@ import (
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -16,7 +17,11 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/database/clients"
+	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/utils"
+	"github.com/komari-monitor/komari/web/api"
+	"github.com/komari-monitor/komari/web/api/client"
 )
 
 // This opt-in test fetches one known public image using the real native helper.
@@ -299,4 +304,131 @@ func TestOnaniHostnameRuntime(t *testing.T) {
 			t.Logf("diagnostic: %s", entry["last_error"])
 		})
 	}
+}
+
+// Replay komari-zig-agent's legacy result upload through the real hook chain, Komari's
+// agent authentication, the v2 JSON-RPC handler and the task database.
+func TestOnaniAgentCompatRuntime(t *testing.T) {
+	oldVersion := utils.CurrentVersion
+	utils.CurrentVersion = "1.4.3"
+	defer func() { utils.CurrentVersion = oldVersion }()
+	withTempDataDir(t)
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	Init(engine)
+	// Same middleware order as the production router for agent endpoints.
+	engine.Use(api.IdentityMiddleware())
+	engine.Group("/api/clients", api.RequireRole(api.RoleAdmin, api.RoleClient)).POST("/v2/rpc", client.UploadV2RPC)
+	handler := WrapHandler(engine)
+
+	root := os.Getenv("ONANI_PROJECT_ROOT")
+	files := map[string]string{}
+	for _, name := range []string{"komari-plugin.json", "script.js", "pages/index.html"} {
+		data, err := os.ReadFile(filepath.Join(root, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[name] = string(data)
+	}
+	if _, err := InstallZip(writePluginZip(t, files)); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveConfiguration("onani", map[string]any{"hostname_enabled": false, "background_enabled": false}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetEnabled("onani", true, true); err != nil {
+		t.Fatal(err)
+	}
+	defer SetEnabled("onani", false, false)
+
+	uuid, token, err := clients.CreateClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	newTask := func(id string) {
+		t.Helper()
+		if err := tasks.CreateTask(id, []string{uuid}, "hostname"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	post := func(rawQuery, body string, header map[string]string) *httptest.ResponseRecorder {
+		r := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/clients/task/result?"+rawQuery, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("User-Agent", "komari-zig-agent")
+		for name, value := range header {
+			req.Header.Set(name, value)
+		}
+		handler.ServeHTTP(r, req)
+		return r
+	}
+	stored := func(id string) (string, *int, *time.Time) {
+		t.Helper()
+		result, err := tasks.GetSpecificTaskResult(id, uuid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result.Result, result.ExitCode, result.FinishedAt
+	}
+	query := "token=" + url.QueryEscape(token)
+
+	t.Run("zig payload is stored through v2", func(t *testing.T) {
+		newTask("compat-ok")
+		body := `{"task_id":"compat-ok","result":"compat-host\n","exit_code":0,"finished_at":"2026-10-05T12:48:35Z"}`
+		r := post(query, body, nil)
+		if r.Code != http.StatusOK || !strings.Contains(r.Body.String(), "success") {
+			t.Fatalf("legacy upload: %d %s\nlogs: %s", r.Code, r.Body.String(), GetLogs("onani"))
+		}
+		result, exitCode, finishedAt := stored("compat-ok")
+		if result != "compat-host\n" || exitCode == nil || *exitCode != 0 {
+			t.Fatalf("stored result=%q exit=%v", result, exitCode)
+		}
+		if finishedAt == nil || !finishedAt.Equal(time.Date(2026, 10, 5, 12, 48, 35, 0, time.UTC)) {
+			t.Fatalf("finished_at=%v", finishedAt)
+		}
+	})
+
+	t.Run("failure exit code and stale encoding header", func(t *testing.T) {
+		newTask("compat-fail")
+		body := `{"task_id":"compat-fail","result":"Remote control is disabled.","exit_code":-1,"finished_at":"not a time"}`
+		r := post(query, body, map[string]string{"Content-Encoding": "gzip"})
+		if r.Code != http.StatusOK {
+			t.Fatalf("legacy failure upload: %d %s", r.Code, r.Body.String())
+		}
+		result, exitCode, finishedAt := stored("compat-fail")
+		if result != "Remote control is disabled." || exitCode == nil || *exitCode != -1 || finishedAt == nil {
+			t.Fatalf("stored result=%q exit=%v finished=%v", result, exitCode, finishedAt)
+		}
+	})
+
+	t.Run("komari still authenticates the agent", func(t *testing.T) {
+		newTask("compat-auth")
+		body := `{"task_id":"compat-auth","result":"forged","exit_code":0}`
+		if r := post("token=wrong-token", body, nil); r.Code != http.StatusUnauthorized {
+			t.Fatalf("wrong token: %d %s", r.Code, r.Body.String())
+		}
+		if result, exitCode, _ := stored("compat-auth"); result != "" || exitCode != nil {
+			t.Fatalf("unauthenticated result stored: %q %v", result, exitCode)
+		}
+	})
+
+	t.Run("malformed bodies keep the original 404", func(t *testing.T) {
+		if r := post(query, "not json", nil); r.Code != http.StatusNotFound {
+			t.Fatalf("malformed body: %d %s", r.Code, r.Body.String())
+		}
+		if !strings.Contains(GetLogs("onani"), "旧版 Agent 任务回传未转换") {
+			t.Fatalf("missing warning: %s", GetLogs("onani"))
+		}
+	})
+
+	t.Run("disabling the plugin removes the hook", func(t *testing.T) {
+		newTask("compat-disabled")
+		if err := SetEnabled("onani", false, false); err != nil {
+			t.Fatal(err)
+		}
+		body := `{"task_id":"compat-disabled","result":"late","exit_code":0}`
+		if r := post(query, body, nil); r.Code != http.StatusNotFound {
+			t.Fatalf("disabled plugin: %d %s", r.Code, r.Body.String())
+		}
+	})
 }
