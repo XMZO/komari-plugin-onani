@@ -228,8 +228,9 @@ test("times read naturally in Chinese and never throw on bad input", () => {
   assert.equal(model.formatRelative(NOW + 3 * DAY, NOW), "3天后");
   assert.equal(model.formatRelative(null, NOW), "—");
   assert.equal(model.formatAbsolute(Number.NaN), "—");
-  assert.match(model.formatAbsolute(NOW), /^2026\/10\/06 \d{2}:00$/);
-  assert.match(model.formatCompact(NOW, NOW), /^10\/06 \d{2}:00$/);
+  // The local date and minute depend on the time zone (UTC-12 … UTC+14, +5:45 …); check the shape.
+  assert.match(model.formatAbsolute(NOW), /^2026\/10\/0[5-7] \d{2}:\d{2}$/);
+  assert.match(model.formatCompact(NOW, NOW), /^10\/0[5-7] \d{2}:\d{2}$/);
   assert.match(model.formatCompact(Date.parse("2025-01-02T00:00:00Z"), NOW), /^2025\//);
 });
 
