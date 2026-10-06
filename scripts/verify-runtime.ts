@@ -31,7 +31,7 @@ function minimalThemeArchive(): Buffer {
 // an in-memory database and temporary plugin directories, never a running deployment.
 const root = fileURLToPath(new URL("..", import.meta.url));
 const komari = path.resolve(process.argv[2] || path.join(root, "..", "komari"));
-const destination = path.join(komari, "internal", "plugin", "onani_background_integration_test.go");
+const destination = path.join(komari, "internal", "plugin", "onani_integration_test.go");
 // The agent-compat test links Komari's real agent auth and v2 handler, which embed the
 // built default theme. Source checkouts lack it (git-ignored), so add minimal placeholders.
 const placeholders = ([
@@ -47,7 +47,7 @@ try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, content, { flag: "wx" });
   }
-  execFileSync("go", ["test", "./internal/plugin", "-run", "^TestOnani(Background|Hostname|AgentCompat)Runtime$", "-count=1", "-v"], {
+  execFileSync("go", ["test", "./internal/plugin", "-run", "^TestOnani(Hostname|AgentCompat|RetiredStorage)Runtime$", "-count=1", "-v"], {
     cwd: komari, env: { ...process.env, ONANI_PROJECT_ROOT: root }, stdio: "inherit", windowsHide: true,
   });
 } finally {

@@ -439,7 +439,7 @@
   });
 
   // src/plugin.ts
-  var import_plugin_sdk4 = __toESM(require_src());
+  var import_plugin_sdk3 = __toESM(require_src());
 
   // src/features/hostname/index.ts
   var import_plugin_sdk = __toESM(require_src());
@@ -1213,311 +1213,8 @@
     new HostnameFeature().load();
   }
 
-  // src/features/background/index.ts
-  var import_plugin_sdk2 = __toESM(require_src());
-
-  // src/features/background/core.ts
-  var BACKGROUND_PATH = "/api/plugins/onani/background";
-  var DEFAULT_SOURCE = "https://t.alcy.cc/ycy/";
-  function bounded(value, fallback, min, max) {
-    return typeof value === "number" && Number.isFinite(value) ? Math.max(min, Math.min(max, Math.round(value))) : fallback;
-  }
-  function resolveBackgroundConfig(raw) {
-    const source = typeof raw.background_source === "string" && raw.background_source.trim() ? raw.background_source.trim() : DEFAULT_SOURCE;
-    if (!/^https:\/\/(?:[a-z0-9][a-z0-9.-]*|\[[a-f0-9:]+\])(?::443)?(?:\/[^\s#\\]*)?$/i.test(source)) {
-      throw new Error("\u80CC\u666F\u6E90\u9700\u8981\u4E0D\u542B\u7528\u6237\u540D\u5BC6\u7801\u7684\u516C\u7F51 HTTPS \u56FE\u7247\u5730\u5740");
-    }
-    return {
-      enabled: raw.background_enabled === true,
-      webp: raw.background_webp === true,
-      source,
-      quality: bounded(raw.background_quality, 78, 40, 90)
-    };
-  }
-  function parseMetadata(value) {
-    if (!value || typeof value !== "object") throw new Error("Invalid image metadata");
-    const m = value;
-    const extensions = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif" };
-    if (!/^[a-f0-9]{64}$/.test(m.id) || !extensions[m.originalMime] || !extensions[m.previewMime] || extensions[m.originalMime] !== m.extension || typeof m.webp !== "boolean" || !Number.isSafeInteger(m.expiresAt) || m.expiresAt <= 0 || !Number.isSafeInteger(m.originalBytes) || m.originalBytes <= 0 || m.originalBytes > 16 * 1024 * 1024 || !Number.isSafeInteger(m.previewBytes) || m.previewBytes <= 0 || m.previewBytes > m.originalBytes) {
-      throw new Error("Invalid image metadata");
-    }
-    return m;
-  }
-  function parseOriginalPath(url) {
-    return /^\/api\/plugins\/onani\/background\/([a-f0-9]{64})\/original(?:\?.*)?$/.exec(url)?.[1] ?? null;
-  }
-  function originalPath(id) {
-    return `${BACKGROUND_PATH}/${id}/original`;
-  }
-
-  // src/features/background/pool.ts
-  var BackgroundPool = class {
-    constructor(deps) {
-      this.deps = deps;
-      this.key = "";
-      this.ids = [];
-      this.lastId = "";
-      this.pending = null;
-      this.nextRefreshAt = 0;
-      this.now = deps.now ?? Date.now;
-    }
-    activate(config) {
-      const key = JSON.stringify(config);
-      if (key === this.key) return;
-      this.key = key;
-      this.ids = [];
-      this.lastId = "";
-      this.nextRefreshAt = 0;
-      try {
-        const saved = this.deps.load();
-        if (saved?.key === key && Array.isArray(saved.ids)) {
-          this.ids = [...new Set(saved.ids.filter((id) => typeof id === "string" && /^[a-f0-9]{64}$/.test(id)))].slice(-8);
-        }
-      } catch (error) {
-        this.deps.error(error);
-      }
-    }
-    ready() {
-      const result = [];
-      this.ids = this.ids.filter((id) => {
-        const image = this.deps.read(id);
-        if (!image || image.expiresAt <= this.now() + 6e4) return false;
-        result.push(image);
-        return true;
-      });
-      return result;
-    }
-    async get(config) {
-      this.activate(config);
-      const ready = this.ready();
-      if (ready.length > 0) {
-        const candidates = ready.length > 1 ? ready.filter((image3) => image3.id !== this.lastId) : ready;
-        const image2 = candidates[Math.floor(Math.random() * candidates.length)];
-        this.lastId = image2.id;
-        void this.refresh(config).catch(this.deps.error);
-        return image2;
-      }
-      const image = await this.refresh(config, true);
-      if (!image) throw new Error("\u80CC\u666F\u6B63\u5728\u51C6\u5907\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5");
-      this.lastId = image.id;
-      return image;
-    }
-    async warm(config) {
-      if (!config.enabled) return;
-      this.activate(config);
-      for (let attempt = 0; attempt < 3 && this.ready().length < 3; attempt++) {
-        if (this.key !== JSON.stringify(config)) return;
-        await this.refresh(config, true);
-      }
-    }
-    async refresh(config, force = false) {
-      const key = JSON.stringify(config);
-      if (this.pending) {
-        if (this.pending.key === key) return this.pending.promise;
-        await this.pending.promise.catch(() => null);
-        if (this.key !== key) return null;
-        return this.refresh(config, force);
-      }
-      if (this.key !== key || !force && this.now() < this.nextRefreshAt) return null;
-      this.nextRefreshAt = this.now() + 3e4;
-      const promise = this.deps.create(config).then((raw) => {
-        const image = parseMetadata(raw);
-        if (this.key !== key) return null;
-        this.ids = [...this.ids.filter((id) => id !== image.id), image.id].slice(-8);
-        this.deps.save({ key, ids: this.ids });
-        return image;
-      }).finally(() => {
-        this.pending = null;
-      });
-      this.pending = { key, promise };
-      return promise;
-    }
-    get running() {
-      return this.pending !== null;
-    }
-  };
-
-  // src/features/background/index.ts
-  var fs2 = __require("fs");
-  var path2 = __require("path");
-  var runtimeProcess = __require("process");
-  var childProcess = __require("child_process");
-  var JOB_TIMEOUT = 3e4;
-  var BackgroundFeature = class {
-    constructor() {
-      this.cacheRoot = path2.join(__storageDir__, "background-cache");
-      this.pool = new BackgroundPool({
-        create: (config) => this.runHelper(config).then((image) => {
-          this.latest = image;
-          this.lastError = null;
-          return image;
-        }),
-        read: (id) => this.readImage(id),
-        load: () => {
-          try {
-            return JSON.parse(fs2.readFileSync(path2.join(this.cacheRoot, "pool.json"), "utf8"));
-          } catch {
-            return null;
-          }
-        },
-        save: (value) => {
-          fs2.writeFileSync(path2.join(this.cacheRoot, "pool.json"), JSON.stringify(value), { mode: 384 });
-        },
-        error: (error) => this.recordError(error)
-      });
-      this.lastError = null;
-      this.latest = null;
-    }
-    load() {
-      import_plugin_sdk2.server.route("GET", BACKGROUND_PATH, (req, res) => this.handle(req, res, "random"));
-      import_plugin_sdk2.server.route("GET", `${BACKGROUND_PATH}/selection`, (req, res) => this.handle(req, res, "selection"));
-      import_plugin_sdk2.server.route("GET", `${BACKGROUND_PATH}/:id/preview`, (req, res) => this.handle(req, res, "preview"));
-      import_plugin_sdk2.server.route("GET", `${BACKGROUND_PATH}/:id/original`, (req, res) => this.handle(req, res, "original"));
-      import_plugin_sdk2.server.route("HEAD", `${BACKGROUND_PATH}/:id/original`, (req, res) => this.handle(req, res, "original"));
-      setTimeout(() => {
-        void this.config().then((config) => this.pool.warm(config)).catch((error) => this.recordError(error));
-      }, 1e3);
-      import_plugin_sdk2.server.registerRPC("plugin:onani.background.status", async () => ({
-        config: await this.config(),
-        endpoint: BACKGROUND_PATH,
-        running: this.pool.running,
-        last_error: this.lastError,
-        latest: this.latest
-      }));
-    }
-    async config() {
-      const raw = await withTimeout(import_plugin_sdk2.server.getConfig(), 3e3, "\u8BFB\u53D6\u80CC\u666F\u4EE3\u7406\u914D\u7F6E\u8D85\u65F6");
-      if (raw.background_enabled !== true) return resolveBackgroundConfig({});
-      return resolveBackgroundConfig(raw);
-    }
-    recordError(error) {
-      this.lastError = error instanceof Error ? error.message : String(error);
-      console.error(`[onani] background job failed: ${this.lastError}`);
-    }
-    readImage(id) {
-      try {
-        const image = parseMetadata(JSON.parse(fs2.readFileSync(path2.join(this.cacheRoot, id, "meta.json"), "utf8")));
-        if (image.id !== id || image.expiresAt <= Date.now() || !fs2.existsSync(path2.join(this.cacheRoot, id, "preview")) || !fs2.existsSync(path2.join(this.cacheRoot, id, "original"))) return null;
-        return image;
-      } catch {
-        return null;
-      }
-    }
-    runHelper(config) {
-      const os = runtimeProcess.platform === "win32" ? "windows" : runtimeProcess.platform;
-      const arch = runtimeProcess.arch === "x64" ? "amd64" : runtimeProcess.arch;
-      if (!["linux", "windows", "darwin"].includes(os) || !["amd64", "arm64"].includes(arch)) {
-        return Promise.reject(new Error("\u80CC\u666F\u4EE3\u7406\u4E0D\u652F\u6301\u5F53\u524D\u670D\u52A1\u5668\u67B6\u6784"));
-      }
-      const executable = path2.join(runtimeProcess.cwd(), "bin", `onani-background-${os}-${arch}${os === "windows" ? ".exe" : ""}`);
-      if (!fs2.existsSync(executable)) return Promise.reject(new Error("\u63D2\u4EF6\u5B89\u88C5\u5305\u7F3A\u5C11\u5F53\u524D\u67B6\u6784\u7684\u80CC\u666F\u5904\u7406\u7A0B\u5E8F"));
-      if (os !== "windows") fs2.chmodSync(executable, 448);
-      const args = ["-cache", this.cacheRoot, "-source", config.source, `-webp=${config.webp}`, "-quality", String(config.quality)];
-      return new Promise((resolve, reject) => {
-        childProcess.execFile(executable, args, { timeout: JOB_TIMEOUT, maxBuffer: 16384, encoding: "utf8", windowsHide: true }, (error, stdout, stderr) => {
-          if (error) {
-            reject(new Error(`\u56FE\u7247\u5904\u7406\u5931\u8D25: ${stderr.trim().slice(0, 500) || error.message}`));
-            return;
-          }
-          try {
-            resolve(parseMetadata(JSON.parse(stdout)));
-          } catch (error2) {
-            reject(error2);
-          }
-        });
-      });
-    }
-    async handle(req, res, kind) {
-      res.setHeader("Cache-Control", "private, no-store, max-age=0");
-      res.setHeader("X-Content-Type-Options", "nosniff");
-      try {
-        const config = await this.config();
-        if (!config.enabled) {
-          this.error(res, 404, "\u80CC\u666F\u4EE3\u7406\u672A\u542F\u7528");
-          return;
-        }
-        const download = kind === "original";
-        let metadata;
-        if (download || kind === "preview") {
-          const id = download ? parseOriginalPath(req.url) : /^\/api\/plugins\/onani\/background\/([a-f0-9]{64})\/preview(?:\?.*)?$/.exec(req.url)?.[1];
-          if (!id) {
-            this.error(res, 404, "\u56FE\u7247\u4E0D\u5B58\u5728");
-            return;
-          }
-          try {
-            metadata = parseMetadata(JSON.parse(fs2.readFileSync(path2.join(this.cacheRoot, id, "meta.json"), "utf8")));
-          } catch {
-            this.error(res, 410, "\u5F53\u524D\u80CC\u666F\u539F\u56FE\u5DF2\u8FC7\u671F\uFF0C\u8BF7\u5237\u65B0\u9875\u9762\u91CD\u65B0\u52A0\u8F7D\u80CC\u666F");
-            return;
-          }
-          if (metadata.id !== id || metadata.expiresAt <= Date.now()) {
-            this.error(res, 410, "\u5F53\u524D\u80CC\u666F\u539F\u56FE\u5DF2\u8FC7\u671F\uFF0C\u8BF7\u5237\u65B0\u9875\u9762\u91CD\u65B0\u52A0\u8F7D\u80CC\u666F");
-            return;
-          }
-        } else {
-          metadata = await this.pool.get(config);
-          if (!(await this.config()).enabled) {
-            this.error(res, 404, "\u80CC\u666F\u4EE3\u7406\u672A\u542F\u7528");
-            return;
-          }
-        }
-        if (res.isAborted()) return;
-        if (kind === "selection") {
-          res.setHeader("Content-Type", "application/json; charset=utf-8");
-          res.end(JSON.stringify({ preview: `${BACKGROUND_PATH}/${metadata.id}/preview`, original: originalPath(metadata.id), expiresAt: metadata.expiresAt }));
-          return;
-        }
-        if (req.method === "HEAD") {
-          if (!fs2.existsSync(path2.join(this.cacheRoot, metadata.id, "original"))) {
-            this.error(res, 410, "\u5F53\u524D\u80CC\u666F\u7F13\u5B58\u5DF2\u8FC7\u671F\uFF0C\u8BF7\u5237\u65B0\u9875\u9762\u91CD\u65B0\u52A0\u8F7D\u80CC\u666F");
-            return;
-          }
-          res.setHeader("Content-Type", metadata.originalMime);
-          res.setHeader("Content-Length", String(metadata.originalBytes));
-          res.statusCode = 200;
-          res.end();
-          return;
-        }
-        let data;
-        try {
-          data = fs2.readFileSync(path2.join(this.cacheRoot, metadata.id, download ? "original" : "preview"));
-        } catch {
-          this.error(res, 410, "\u5F53\u524D\u80CC\u666F\u7F13\u5B58\u5DF2\u8FC7\u671F\uFF0C\u8BF7\u5237\u65B0\u9875\u9762\u91CD\u65B0\u52A0\u8F7D\u80CC\u666F");
-          return;
-        }
-        if (download || kind === "preview") {
-          const ttl = Math.max(0, Math.min(300, Math.floor((metadata.expiresAt - Date.now()) / 1e3)));
-          res.setHeader("Cache-Control", `public, max-age=${ttl}, immutable`);
-        }
-        res.setHeader("Content-Type", download ? metadata.originalMime : metadata.previewMime);
-        res.setHeader("Content-Length", String(data.length));
-        if (download) {
-          res.setHeader("Content-Disposition", `attachment; filename="komari-background-${metadata.id.slice(0, 12)}.${metadata.extension}"`);
-        } else {
-          res.setHeader("X-Onani-Original", originalPath(metadata.id));
-          res.setHeader("X-Onani-Preview", metadata.webp ? "webp" : "original");
-        }
-        res.statusCode = 200;
-        res.write(data);
-        res.end();
-      } catch (error) {
-        this.lastError = error instanceof Error ? error.message : String(error);
-        console.error(`[onani] background request failed: ${this.lastError}`);
-        this.error(res, 503, "\u80CC\u666F\u6682\u65F6\u65E0\u6CD5\u52A0\u8F7D\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5");
-      }
-    }
-    error(res, status, message) {
-      res.statusCode = status;
-      res.setHeader("Content-Type", "application/json; charset=utf-8");
-      res.end(JSON.stringify({ error: message }));
-    }
-  };
-  function registerBackgroundFeature() {
-    new BackgroundFeature().load();
-  }
-
   // src/features/agent-compat/index.ts
-  var import_plugin_sdk3 = __toESM(require_src());
+  var import_plugin_sdk2 = __toESM(require_src());
 
   // src/features/agent-compat/core.ts
   var LEGACY_TASK_RESULT_PATH = "/api/clients/task/result";
@@ -1573,7 +1270,7 @@
       this.suppressedWarnings = 0;
     }
     load() {
-      import_plugin_sdk3.server.hook("request", LEGACY_TASK_RESULT_MATCHER, (req) => this.rewrite(req));
+      import_plugin_sdk2.server.hook("request", LEGACY_TASK_RESULT_MATCHER, (req) => this.rewrite(req));
     }
     rewrite(req) {
       const rewrite = rewriteLegacyTaskResult(
@@ -1609,12 +1306,34 @@
     new AgentCompatFeature().load();
   }
 
+  // src/shared/retired-storage.ts
+  var fs2 = __require("fs");
+  var path2 = __require("path");
+  var SAFE_ENTRY = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+  function removeRetiredStorage(entries) {
+    const removed = [];
+    for (const entry of entries) {
+      if (!SAFE_ENTRY.test(entry) || entry.includes("..")) continue;
+      const target = path2.join(__storageDir__, entry);
+      try {
+        if (!fs2.existsSync(target)) continue;
+        fs2.rmSync(target, { recursive: true, force: true });
+        removed.push(entry);
+        console.log(`[onani] removed retired storage: ${entry}`);
+      } catch (error) {
+        console.warn(`[onani] failed to remove retired storage ${entry}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    return removed;
+  }
+
   // src/plugin.ts
-  (0, import_plugin_sdk4.definePlugin)({
+  var RETIRED_STORAGE = ["background-cache"];
+  (0, import_plugin_sdk3.definePlugin)({
     load() {
       registerAgentCompatFeature();
       registerHostnameFeature();
-      registerBackgroundFeature();
+      setTimeout(() => removeRetiredStorage(RETIRED_STORAGE), 0);
     }
   });
 })();

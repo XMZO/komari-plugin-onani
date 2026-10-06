@@ -2,176 +2,274 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
     <meta
       http-equiv="Content-Security-Policy"
       content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:"
     />
+    <meta name="color-scheme" content="light dark" />
     <title>Onani 工具箱</title>
     <link rel="stylesheet" href="./index.css" />
+    <script src="./theme.js"></script>
   </head>
   <body>
-    <main class="shell">
-      <header class="app-header">
-        <div class="app-heading">
-          <p class="eyebrow">ONANI TOOLBOX</p>
-          <h1>Onani 工具箱</h1>
-          <p class="subtitle">集中管理插件提供的节点辅助功能。</p>
-        </div>
-        <section id="update-card" class="update-card" aria-label="插件更新">
-          <div class="update-copy">
-            <span class="update-version">当前版本 <strong id="update-current">v0.2.3</strong></span>
-            <span id="update-status" class="update-status" role="status" aria-live="polite">仅在点击时检查 GitHub Release</span>
+    <svg class="sprite" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">
+      <symbol id="i-server" viewBox="0 0 24 24"><rect width="20" height="8" x="2" y="2" rx="2" /><rect width="20" height="8" x="2" y="14" rx="2" /><path d="M6 6h.01M6 18h.01" /></symbol>
+      <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7.5" /><path d="m20.5 20.5-4.3-4.3" /></symbol>
+      <symbol id="i-search-x" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7.5" /><path d="m20.5 20.5-4.3-4.3M13.5 8.5l-5 5M8.5 8.5l5 5" /></symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" /><path d="M21 3v5h-5" /><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" /><path d="M8 16H3v5" /></symbol>
+      <symbol id="i-zap" viewBox="0 0 24 24"><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z" /></symbol>
+      <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12" /></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5" /></symbol>
+      <symbol id="i-copy" viewBox="0 0 24 24"><rect width="13" height="13" x="8.5" y="8.5" rx="2" /><path d="M4.5 15.5c-1.1 0-2-.9-2-2v-9c0-1.1.9-2 2-2h9c1.1 0 2 .9 2 2" /></symbol>
+      <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6" /></symbol>
+      <symbol id="i-alert" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.5" /><path d="M12 7.5v5M12 16.5h.01" /></symbol>
+      <symbol id="i-warning" viewBox="0 0 24 24"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" /><path d="M12 9v4M12 17h.01" /></symbol>
+      <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.5" /><path d="M12 16v-4.5M12 8h.01" /></symbol>
+      <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.5" /><path d="M12 7v5l3 2" /></symbol>
+      <symbol id="i-up" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.5" /><path d="m16 12-4-4-4 4M12 16V8" /></symbol>
+      <symbol id="i-plug" viewBox="0 0 24 24"><path d="M12 22v-5M9 8V2M15 8V2M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z" /></symbol>
+      <symbol id="i-cloud-off" viewBox="0 0 24 24"><path d="m2 2 20 20M5.78 5.78A7 7 0 0 0 9 19h8.5a4.5 4.5 0 0 0 1.31-.2M21.53 16.5A4.5 4.5 0 0 0 17.5 10h-1.79A7 7 0 0 0 10.6 5.05" /></symbol>
+    </svg>
+
+    <div class="app" id="app" data-view="loading">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"><svg class="icon"><use href="#i-server" /></svg></span>
+          <div class="brand-copy">
+            <h1>节点主机名</h1>
+            <p class="brand-meta" id="brand-meta">Onani 工具箱</p>
           </div>
-          <button id="update-action" class="button small update-action" type="button">检查更新</button>
-        </section>
+        </div>
+        <div class="coverage" id="coverage" title="已获取主机名的节点比例">
+          <span class="coverage-bar" aria-hidden="true">
+            <span class="coverage-segment" data-segment="cached"></span>
+            <span class="coverage-segment" data-segment="expired"></span>
+            <span class="coverage-segment" data-segment="failed"></span>
+            <span class="coverage-segment" data-segment="missing"></span>
+          </span>
+          <span class="coverage-text"><strong id="coverage-value">—</strong><span id="coverage-total"></span></span>
+        </div>
+        <div class="updater" id="updater" data-mode="idle">
+          <span class="updater-status" id="update-status" role="status" aria-live="polite"></span>
+          <button class="updater-button" id="update-action" type="button">
+            <span class="updater-version" id="update-current">v0.3.0</span>
+            <span class="updater-label"><span class="updater-glyph" aria-hidden="true"></span><span id="update-label">检查更新</span></span>
+          </button>
+        </div>
       </header>
 
-      <nav class="feature-tabs" role="tablist" aria-label="工具箱功能">
-        <button
-          id="hostname-tab"
-          class="feature-tab active"
-          type="button"
-          role="tab"
-          aria-selected="true"
-          aria-controls="hostname-panel"
-        >
-          主机名
-          <span id="hostname-tab-count" class="tab-count" aria-label="节点数量">—</span>
-        </button>
-        <button id="background-tab" class="feature-tab" type="button" role="tab" aria-selected="false" aria-controls="background-panel" tabindex="-1">背景图片</button>
-      </nav>
-
-      <section id="hostname-panel" role="tabpanel" aria-labelledby="hostname-tab">
-        <header class="feature-header">
-          <div>
-            <h2>节点主机名</h2>
-            <p class="subtitle">查看 VPS 的系统主机名；仅在缓存需要刷新时对在线节点执行固定命令 <code>hostname</code>，系统没有该命令时改用 <code>uname -n</code>。</p>
-          </div>
-          <div class="actions">
-            <button id="refresh-due" class="button primary" type="button">刷新缺失/过期</button>
-            <button id="force-all" class="button" type="button">强制刷新全部在线节点</button>
-          </div>
-        </header>
-
-        <div class="feedback" aria-label="操作状态">
-          <div id="error" class="notice error" role="alert" hidden></div>
-          <div id="update-error" class="notice error" role="alert" hidden></div>
-          <div id="progress" class="notice" role="status" aria-live="polite" hidden></div>
+      <div class="controls">
+        <div class="filters" id="filters" role="radiogroup" aria-label="按状态筛选节点">
+          <span class="filter-indicator" id="filter-indicator" aria-hidden="true"></span>
+          <button class="chip" type="button" role="radio" aria-checked="true" tabindex="0" data-filter="all">
+            <span class="chip-label">全部</span><span class="chip-count" data-count="all">0</span>
+          </button>
+          <button class="chip" type="button" role="radio" aria-checked="false" tabindex="-1" data-filter="cached" data-tone="cached">
+            <span class="chip-dot" aria-hidden="true"></span><span class="chip-label">正常</span><span class="chip-count" data-count="cached">0</span>
+          </button>
+          <button class="chip" type="button" role="radio" aria-checked="false" tabindex="-1" data-filter="failed" data-tone="failed">
+            <span class="chip-dot" aria-hidden="true"></span><span class="chip-label">失败</span><span class="chip-count" data-count="failed">0</span>
+          </button>
+          <button class="chip" type="button" role="radio" aria-checked="false" tabindex="-1" data-filter="missing" data-tone="missing">
+            <span class="chip-dot" aria-hidden="true"></span><span class="chip-label">未采集</span><span class="chip-count" data-count="missing">0</span>
+          </button>
+          <button class="chip" type="button" role="radio" aria-checked="false" tabindex="-1" data-filter="expired" data-tone="expired">
+            <span class="chip-dot" aria-hidden="true"></span><span class="chip-label">已过期</span><span class="chip-count" data-count="expired">0</span>
+          </button>
+          <button class="chip" type="button" role="radio" aria-checked="false" tabindex="-1" data-filter="offline" data-tone="offline">
+            <span class="chip-dot" aria-hidden="true"></span><span class="chip-label">离线</span><span class="chip-count" data-count="offline">0</span>
+          </button>
         </div>
 
-        <section class="summary" aria-label="主机名缓存摘要">
-          <article><span>节点总数</span><strong id="node-count">—</strong></article>
-          <article><span>已获取主机名</span><strong id="cached-count">—</strong></article>
-          <article><span>在线节点</span><strong id="online-count">—</strong></article>
-          <article><span>缓存周期</span><strong id="cache-days">—</strong></article>
-        </section>
+        <label class="search" for="search">
+          <svg class="icon search-icon" aria-hidden="true"><use href="#i-search" /></svg>
+          <span class="visually-hidden">搜索节点名、主机名、UUID 或地区代码</span>
+          <input
+            id="search"
+            type="search"
+            maxlength="253"
+            autocomplete="off"
+            spellcheck="false"
+            enterkeyhint="search"
+            placeholder="搜索节点名、主机名或 UUID"
+          />
+          <kbd class="search-key" aria-hidden="true">/</kbd>
+          <button class="search-clear" id="search-clear" type="button" aria-label="清除搜索" hidden>
+            <svg class="icon" aria-hidden="true"><use href="#i-x" /></svg>
+          </button>
+        </label>
 
-        <div id="refresh-summary" class="refresh-summary" role="status" aria-live="polite" hidden></div>
+        <div class="actions">
+          <button class="btn btn-primary" id="refresh-due" type="button" title="刷新缺失或已过期的在线节点" disabled>
+            <svg class="icon" aria-hidden="true"><use href="#i-refresh" /></svg><span class="btn-text">刷新缺失/过期</span>
+          </button>
+          <button class="btn" id="force-all" type="button" title="强制刷新全部在线节点" disabled>
+            <svg class="icon" aria-hidden="true"><use href="#i-zap" /></svg><span class="btn-text">强制刷新全部</span>
+          </button>
+        </div>
+      </div>
 
-        <section class="panel">
-          <div class="toolbar">
-            <label class="search-field" for="hostname-search">
-              <span class="visually-hidden">搜索节点名、系统主机名或 UUID</span>
-              <input
-                id="hostname-search"
-                type="search"
-                maxlength="253"
-                autocomplete="off"
-                spellcheck="false"
-                placeholder="搜索节点名、主机名或 UUID"
-              />
-            </label>
-            <select id="online-filter" aria-label="按在线状态筛选">
-              <option value="all">全部在线状态</option>
-              <option value="online">仅在线</option>
-              <option value="offline">仅离线</option>
-            </select>
-            <select id="cache-filter" aria-label="按采集状态筛选">
-              <option value="all">全部采集状态</option>
-              <option value="cached">已缓存</option>
-              <option value="missing">未采集</option>
-              <option value="expired">已过期</option>
-              <option value="failed">采集失败</option>
-            </select>
-            <button id="clear-filters" class="button subtle" type="button" hidden>清除筛选</button>
-            <span id="result-count" class="result-count" role="status" aria-live="polite">—</span>
+      <section class="board" aria-label="节点主机名列表">
+        <div class="activity" id="activity" data-state="loading">
+          <span class="activity-icon" aria-hidden="true">
+            <span class="spinner"></span>
+            <svg class="icon icon-info"><use href="#i-info" /></svg>
+            <svg class="icon icon-warning"><use href="#i-warning" /></svg>
+            <svg class="icon icon-done"><use href="#i-check" /></svg>
+          </span>
+          <span class="activity-text" id="activity-text">正在读取节点与缓存…</span>
+          <button class="activity-action" id="activity-action" type="button" hidden>查看失败</button>
+          <span class="activity-count" id="activity-count"></span>
+          <span class="activity-progress" aria-hidden="true"><span class="activity-bar" id="activity-bar"></span></span>
+        </div>
+
+        <div class="list-scroll" id="list-scroll">
+          <div class="list-head" aria-hidden="true">
+            <span></span><span>节点</span><span>主机名</span><span>状态</span><span>在线</span><span>采集时间</span><span></span>
           </div>
-
-          <div
-            id="table-wrap"
-            class="table-wrap"
-            role="region"
-            aria-label="主机名节点列表"
-            tabindex="0"
-          >
-            <table aria-describedby="result-count">
-              <thead>
-                <tr>
-                  <th>面板节点</th>
-                  <th>系统主机名</th>
-                  <th>状态</th>
-                  <th>采集时间</th>
-                  <th class="action-column">操作</th>
-                </tr>
-              </thead>
-              <tbody id="node-list"></tbody>
-            </table>
+          <ol class="list" id="list" aria-label="节点列表"></ol>
+          <div class="skeleton" id="skeleton" aria-hidden="true">
+            <div class="skeleton-row"><i></i><i></i><i></i><i></i><i></i></div>
+            <div class="skeleton-row"><i></i><i></i><i></i><i></i><i></i></div>
+            <div class="skeleton-row"><i></i><i></i><i></i><i></i><i></i></div>
+            <div class="skeleton-row"><i></i><i></i><i></i><i></i><i></i></div>
+            <div class="skeleton-row"><i></i><i></i><i></i><i></i><i></i></div>
+            <div class="skeleton-row"><i></i><i></i><i></i><i></i><i></i></div>
+            <div class="skeleton-row"><i></i><i></i><i></i><i></i><i></i></div>
+            <div class="skeleton-row"><i></i><i></i><i></i><i></i><i></i></div>
           </div>
-          <div id="empty" class="empty" hidden>
-            <strong id="empty-title">暂无节点</strong>
-            <span id="empty-description">Komari 当前没有可显示的节点。</span>
-            <button id="empty-clear" class="button small" type="button" hidden>清除筛选</button>
+          <div class="empty" id="empty" hidden>
+            <span class="empty-icon" aria-hidden="true"><svg class="icon"><use id="empty-icon" href="#i-search-x" /></svg></span>
+            <strong class="empty-title" id="empty-title">没有匹配的节点</strong>
+            <p class="empty-text" id="empty-text"></p>
+            <button class="btn btn-sm" id="empty-action" type="button" hidden></button>
           </div>
-        </section>
+        </div>
+      </section>
+    </div>
 
-        <footer>
-          刷新由 Komari 在后台执行，任务加入队列后关闭页面不会中断。最多并行 4 个作业；Agent 最长等待 20 秒，单个作业从点击起最多保留 30 秒。
+    <template id="row-template">
+      <li class="row">
+        <span class="region"></span>
+        <div class="row-node">
+          <button class="row-name" type="button"></button>
+          <span class="row-id"></span>
+        </div>
+        <div class="row-host">
+          <button class="hostname" type="button">
+            <span class="hostname-text"></span><svg class="icon hostname-copy" aria-hidden="true"><use href="#i-copy" /></svg>
+          </button>
+          <span class="hostname-empty">—</span>
+        </div>
+        <div class="row-meta">
+          <div class="row-state"><span class="pill"><span class="pill-dot" aria-hidden="true"></span><span class="pill-label"></span></span></div>
+          <div class="row-presence"><span class="presence"><span class="presence-dot" aria-hidden="true"></span><span class="presence-label"></span></span></div>
+          <div class="row-time"><time class="time"></time></div>
+        </div>
+        <div class="row-actions">
+          <button class="icon-btn row-refresh" type="button">
+            <svg class="icon icon-refresh" aria-hidden="true"><use href="#i-refresh" /></svg>
+            <svg class="icon icon-queued" aria-hidden="true"><use href="#i-clock" /></svg>
+          </button>
+          <svg class="icon row-chevron" aria-hidden="true"><use href="#i-chevron" /></svg>
+        </div>
+        <button class="row-error" type="button">
+          <svg class="icon" aria-hidden="true"><use href="#i-alert" /></svg><span class="row-error-text"></span>
+        </button>
+      </li>
+    </template>
+
+    <template id="toast-template">
+      <div class="toast" role="status">
+        <svg class="icon toast-icon" aria-hidden="true"><use href="#i-info" /></svg>
+        <p class="toast-text"></p>
+        <button class="toast-close" type="button" aria-label="关闭提示"><svg class="icon" aria-hidden="true"><use href="#i-x" /></svg></button>
+      </div>
+    </template>
+
+    <dialog class="drawer" id="drawer" aria-labelledby="drawer-title">
+      <div class="drawer-panel" tabindex="-1">
+        <header class="drawer-head">
+          <span class="region region-lg" id="drawer-region"></span>
+          <div class="drawer-heading">
+            <h2 id="drawer-title">节点详情</h2>
+            <button class="drawer-uuid" id="drawer-uuid" type="button" title="复制 UUID">
+              <span id="drawer-uuid-text"></span><svg class="icon" aria-hidden="true"><use href="#i-copy" /></svg>
+            </button>
+          </div>
+          <button class="icon-btn" id="drawer-close" type="button" aria-label="关闭详情">
+            <svg class="icon" aria-hidden="true"><use href="#i-x" /></svg>
+          </button>
+        </header>
+        <div class="drawer-body">
+          <section class="hero" id="drawer-hero">
+            <span class="hero-label">系统主机名</span>
+            <div class="hero-value">
+              <code class="hero-hostname" id="drawer-hostname"></code>
+              <button class="icon-btn" id="drawer-copy-host" type="button" aria-label="复制主机名" title="复制主机名">
+                <svg class="icon" aria-hidden="true"><use href="#i-copy" /></svg>
+              </button>
+            </div>
+            <div class="hero-badges">
+              <span class="pill" id="drawer-pill"><span class="pill-dot" aria-hidden="true"></span><span class="pill-label" id="drawer-pill-label"></span></span>
+              <span class="presence" id="drawer-presence"><span class="presence-dot" aria-hidden="true"></span><span class="presence-label" id="drawer-presence-label"></span></span>
+            </div>
+          </section>
+
+          <dl class="facts">
+            <div class="fact"><dt>采集时间</dt><dd id="fact-collected">—</dd></div>
+            <div class="fact"><dt>缓存到期</dt><dd id="fact-expiry">—</dd></div>
+            <div class="fact"><dt>最近尝试</dt><dd id="fact-attempt">—</dd></div>
+            <div class="fact"><dt>Agent</dt><dd id="fact-agent">—</dd></div>
+            <div class="fact fact-wide"><dt>系统</dt><dd id="fact-os">—</dd></div>
+          </dl>
+
+          <section class="failure" id="drawer-failure" hidden>
+            <header class="failure-head">
+              <svg class="icon" aria-hidden="true"><use href="#i-warning" /></svg>
+              <h3>最近一次失败</h3>
+            </header>
+            <p class="failure-reason" id="failure-reason"></p>
+            <dl class="failure-facts">
+              <div><dt>阶段</dt><dd id="failure-stage">—</dd></div>
+              <div><dt>时间</dt><dd id="failure-time">—</dd></div>
+              <div><dt>任务 ID</dt><dd id="failure-task">—</dd></div>
+              <div id="failure-rpc-row"><dt>RPC 错误码</dt><dd id="failure-rpc">—</dd></div>
+              <div id="failure-exit-row"><dt>退出码</dt><dd id="failure-exit">—</dd></div>
+            </dl>
+            <pre class="failure-output" id="failure-output" hidden></pre>
+            <button class="btn btn-sm" id="drawer-copy-report" type="button">
+              <svg class="icon" aria-hidden="true"><use href="#i-copy" /></svg><span>复制排查信息</span>
+            </button>
+          </section>
+        </div>
+        <footer class="drawer-foot">
+          <p class="drawer-note" id="drawer-note"></p>
+          <button class="btn btn-primary" id="drawer-refresh" type="button">
+            <svg class="icon" aria-hidden="true"><use href="#i-refresh" /></svg><span id="drawer-refresh-label">强制刷新</span>
+          </button>
         </footer>
-      </section>
-      <section id="background-panel" role="tabpanel" aria-labelledby="background-tab" hidden>
-        <header class="feature-header"><div><h2>背景图片</h2><p class="subtitle">保留随机背景与原始尺寸，网页使用 WebP 压缩版本，下载时取得当前这张图片的原文件。</p></div></header>
-        <form id="background-form" class="panel background-form">
-          <label class="background-switch"><input id="background-enabled" type="checkbox" />启用背景代理</label>
-          <label class="background-switch"><input id="background-webp" type="checkbox" />WebP 原尺寸背景，下载原图</label>
-          <label>图片源<input id="background-source" type="url" required value="https://t.alcy.cc/ycy/" /></label>
-          <p class="subtitle">支持公网 HTTPS 图片地址及随机图接口，可自动跟随跳转到其他公网图片域名。</p>
-          <div class="background-options">
-            <label>WebP 压缩质量<input id="background-quality" type="number" min="40" max="90" value="78" required /></label>
-          </div>
-          <p class="subtitle">转码失败或体积没有变小时使用原图。动画保持原样；背景会提前准备并从缓存选取；首次准备仍需等待。缓存最多保留 24 小时，达到 256 MiB 或 128 张时提前淘汰旧图。</p>
-          <div><button id="background-save" class="button primary" type="submit" disabled>保存设置</button></div>
-          <p id="background-feedback" role="status" aria-live="polite"></p>
-        </form>
-        <section class="panel background-form">
-          <h3>接入 Naive 主题</h3>
-          <p>在主题设置中将亮色或暗色背景地址改为：</p>
-          <code>/api/plugins/onani/background</code>
-          <p class="subtitle">开启 WebP 时请使用 Naive 2.0.39 或更新版本，确保下载按钮保存转换前的原文件。关闭代理后，该背景地址将停止提供图片。</p>
-          <p id="background-statistics" class="subtitle"></p>
-        </section>
-      </section>
-    </main>
+      </div>
+    </dialog>
 
-    <dialog
-      id="confirm-dialog"
-      class="confirm-dialog"
-      aria-labelledby="confirm-title"
-      aria-describedby="confirm-message"
-    >
-      <div class="confirm-dialog-content">
-        <p class="confirm-kicker">ONANI TOOLBOX</p>
+    <dialog class="confirm" id="confirm" aria-labelledby="confirm-title" aria-describedby="confirm-message">
+      <div class="confirm-panel">
+        <span class="confirm-icon" aria-hidden="true"><svg class="icon"><use id="confirm-icon" href="#i-zap" /></svg></span>
         <h2 id="confirm-title">确认操作</h2>
-        <p id="confirm-message" class="confirm-message"></p>
-        <div class="confirm-dialog-actions">
-          <button id="confirm-cancel" class="button subtle" type="button">取消</button>
-          <button id="confirm-accept" class="button primary" type="button">继续</button>
+        <p id="confirm-message"></p>
+        <div class="confirm-actions">
+          <button class="btn" id="confirm-cancel" type="button">取消</button>
+          <button class="btn btn-primary" id="confirm-accept" type="button">继续</button>
         </div>
       </div>
     </dialog>
 
+    <div class="toasts" id="toasts" popover="manual"></div>
+    <div class="visually-hidden" id="announcer" aria-live="polite"></div>
+
+    <script src="./model.js"></script>
     <script src="./index.js"></script>
-    <script src="./background.js"></script>
   </body>
 </html>

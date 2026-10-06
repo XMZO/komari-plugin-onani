@@ -10,7 +10,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,142 +23,6 @@ import (
 	"github.com/komari-monitor/komari/web/api"
 	"github.com/komari-monitor/komari/web/api/client"
 )
-
-// This opt-in test fetches one known public image using the real native helper.
-// Everything else (database, installation, config, cache) is isolated by Komari's test harness.
-func TestOnaniBackgroundRuntime(t *testing.T) {
-	oldVersion := utils.CurrentVersion
-	utils.CurrentVersion = "1.4.3"
-	defer func() { utils.CurrentVersion = oldVersion }()
-	withTempDataDir(t)
-	gin.SetMode(gin.TestMode)
-	engine := gin.New()
-	Init(engine)
-	root := os.Getenv("ONANI_PROJECT_ROOT")
-	if root == "" {
-		t.Fatal("ONANI_PROJECT_ROOT is required")
-	}
-	binary := "onani-background-" + runtime.GOOS + "-" + runtime.GOARCH
-	if runtime.GOOS == "windows" {
-		binary += ".exe"
-	}
-	files := map[string]string{}
-	for _, name := range []string{"komari-plugin.json", "script.js", "pages/index.html", "pages/index.js", "pages/index.css", "pages/background.js", "bin/" + binary} {
-		data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(name)))
-		if err != nil {
-			t.Fatal(err)
-		}
-		files[name] = string(data)
-	}
-	if _, err := InstallZip(writePluginZip(t, files)); err != nil {
-		t.Fatal(err)
-	}
-	config := map[string]any{"hostname_enabled": false, "background_enabled": false, "background_webp": true,
-		"background_source": "https://t.alcy.cc/pic/pc/2025-10-913c0a13ec6c8e51ac40d9239419d345.webp"}
-	if err := SaveConfiguration("onani", config); err != nil {
-		t.Fatal(err)
-	}
-	if err := SetEnabled("onani", true, true); err != nil {
-		t.Fatal(err)
-	}
-	defer SetEnabled("onani", false, false)
-	request := func(url string) *httptest.ResponseRecorder {
-		r := httptest.NewRecorder()
-		engine.ServeHTTP(r, httptest.NewRequest(http.MethodGet, url, nil))
-		return r
-	}
-	endpoint := "/api/plugins/onani/background"
-	if r := request(endpoint); r.Code != 404 {
-		t.Fatalf("disabled: %d %s", r.Code, r.Body.String())
-	}
-	config["background_enabled"] = true
-	if err := SaveConfiguration("onani", config); err != nil {
-		t.Fatal(err)
-	}
-	preview := request(endpoint)
-	if preview.Code != 200 {
-		t.Fatalf("preview: %d %s\nlogs: %s", preview.Code, preview.Body.String(), GetLogs("onani"))
-	}
-	if preview.Header().Get("X-Onani-Preview") != "webp" || preview.Header().Get("Content-Type") != "image/webp" {
-		t.Fatalf("headers=%v", preview.Header())
-	}
-	if !strings.Contains(preview.Header().Get("Cache-Control"), "no-store") {
-		t.Fatal("random endpoint can be cached")
-	}
-	originalPath := preview.Header().Get("X-Onani-Original")
-	original := request(originalPath)
-	if original.Code != 200 {
-		t.Fatalf("original: %d %s", original.Code, original.Body.String())
-	}
-	if !strings.Contains(original.Header().Get("Content-Disposition"), "attachment;") {
-		t.Fatal("missing download disposition")
-	}
-	if original.Body.Len() <= preview.Body.Len() {
-		t.Fatal("preview not smaller")
-	}
-	id := strings.Split(originalPath, "/")[5]
-	disk, err := os.ReadFile(filepath.Join(StorageDir, "onani", "background-cache", id, "original"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(disk, original.Body.Bytes()) {
-		t.Fatal("download differs from original cache")
-	}
-	repeated := request(originalPath)
-	if !bytes.Equal(repeated.Body.Bytes(), original.Body.Bytes()) {
-		t.Fatal("download changed on repeat")
-	}
-	t.Logf("real runtime: original=%d preview=%d savings=%.1f%%", original.Body.Len(), preview.Body.Len(), 100*(1-float64(preview.Body.Len())/float64(original.Body.Len())))
-	started := time.Now()
-	selection := request(endpoint + "/selection")
-	if selection.Code != 200 || time.Since(started) > time.Second {
-		t.Fatalf("warm selection should be immediate: %d %s", selection.Code, time.Since(started))
-	}
-	var selected struct {
-		Preview  string `json:"preview"`
-		Original string `json:"original"`
-	}
-	if err := json.Unmarshal(selection.Body.Bytes(), &selected); err != nil {
-		t.Fatal(err)
-	}
-	if selected.Original != originalPath {
-		t.Fatal("selection changed the fixed-source original")
-	}
-	fixed := request(selected.Preview)
-	if fixed.Code != 200 || !bytes.Equal(fixed.Body.Bytes(), preview.Body.Bytes()) {
-		t.Fatal("fixed preview differs")
-	}
-	if !strings.Contains(fixed.Header().Get("Cache-Control"), "public") || !strings.Contains(original.Header().Get("Cache-Control"), "public") {
-		t.Fatal("immutable images are not CDN cacheable")
-	}
-	head := httptest.NewRecorder()
-	engine.ServeHTTP(head, httptest.NewRequest(http.MethodHead, selected.Original, nil))
-	if head.Code != 200 || head.Body.Len() != 0 {
-		t.Fatal("original HEAD should check availability without transferring image")
-	}
-	t.Logf("warm selection + fixed preview + HEAD: %s", time.Since(started))
-	metadataPath := filepath.Join(StorageDir, "onani", "background-cache", id, "meta.json")
-	raw, err := os.ReadFile(metadataPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var m map[string]any
-	json.Unmarshal(raw, &m)
-	m["expiresAt"] = 1
-	raw, _ = json.Marshal(m)
-	os.WriteFile(metadataPath, raw, 0600)
-	if r := request(originalPath); r.Code != 410 {
-		t.Fatalf("expired original: %d", r.Code)
-	}
-	if r := request(endpoint + "/" + strings.Repeat("f", 64) + "/original"); r.Code != 410 {
-		t.Fatalf("missing original: %d", r.Code)
-	}
-	config["background_enabled"] = false
-	SaveConfiguration("onani", config)
-	if r := request(originalPath); r.Code != 404 {
-		t.Fatalf("disabled original: %d", r.Code)
-	}
-}
 
 // Exercise the real plugin scheduler and cache against deterministic Komari RPC fixtures.
 func TestOnaniHostnameRuntime(t *testing.T) {
@@ -181,7 +44,7 @@ func TestOnaniHostnameRuntime(t *testing.T) {
 	if _, err := InstallZip(writePluginZip(t, files)); err != nil {
 		t.Fatal(err)
 	}
-	if err := SaveConfiguration("onani", map[string]any{"hostname_enabled": true, "hostname_auto_refresh": false, "background_enabled": false}); err != nil {
+	if err := SaveConfiguration("onani", map[string]any{"hostname_enabled": true, "hostname_auto_refresh": false}); err != nil {
 		t.Fatal(err)
 	}
 	const uuid = "f9e79538-e4a8-43b2-8e58-a1857c82cc5f"
@@ -376,7 +239,7 @@ func TestOnaniAgentCompatRuntime(t *testing.T) {
 	if _, err := InstallZip(writePluginZip(t, files)); err != nil {
 		t.Fatal(err)
 	}
-	if err := SaveConfiguration("onani", map[string]any{"hostname_enabled": false, "background_enabled": false}); err != nil {
+	if err := SaveConfiguration("onani", map[string]any{"hostname_enabled": false}); err != nil {
 		t.Fatal(err)
 	}
 	if err := SetEnabled("onani", true, true); err != nil {
@@ -464,6 +327,13 @@ func TestOnaniAgentCompatRuntime(t *testing.T) {
 		}
 	})
 
+	t.Run("oversized bodies are refused before the hook runs", func(t *testing.T) {
+		body := `{"task_id":"compat-big","result":"` + strings.Repeat("x", 8<<20) + `","exit_code":0}`
+		if r := post(query, body, nil); r.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("oversized body: %d", r.Code)
+		}
+	})
+
 	t.Run("disabling the plugin removes the hook", func(t *testing.T) {
 		newTask("compat-disabled")
 		if err := SetEnabled("onani", false, false); err != nil {
@@ -474,4 +344,64 @@ func TestOnaniAgentCompatRuntime(t *testing.T) {
 			t.Fatalf("disabled plugin: %d %s", r.Code, r.Body.String())
 		}
 	})
+}
+
+// The background proxy was removed in 0.3.0. Its leftover image cache must be deleted
+// on load without touching the hostname cache that shares the storage directory.
+func TestOnaniRetiredStorageRuntime(t *testing.T) {
+	oldVersion := utils.CurrentVersion
+	utils.CurrentVersion = "1.4.3"
+	defer func() { utils.CurrentVersion = oldVersion }()
+	withTempDataDir(t)
+	gin.SetMode(gin.TestMode)
+	Init(gin.New())
+	root := os.Getenv("ONANI_PROJECT_ROOT")
+	files := map[string]string{}
+	for _, name := range []string{"komari-plugin.json", "script.js", "pages/index.html"} {
+		data, err := os.ReadFile(filepath.Join(root, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[name] = string(data)
+	}
+	if _, err := InstallZip(writePluginZip(t, files)); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveConfiguration("onani", map[string]any{"hostname_enabled": false}); err != nil {
+		t.Fatal(err)
+	}
+	storage := filepath.Join(StorageDir, "onani")
+	image := filepath.Join(storage, "background-cache", strings.Repeat("a", 64))
+	if err := os.MkdirAll(image, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(image, "original"), []byte("retired image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hostnameCache := filepath.Join(storage, "hostname-cache.json")
+	cacheBody := []byte(`{"schema":1,"updated_at":null,"entries":{}}`)
+	if err := os.WriteFile(hostnameCache, cacheBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetEnabled("onani", true, true); err != nil {
+		t.Fatal(err)
+	}
+	defer SetEnabled("onani", false, false)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(storage, "background-cache")); os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("retired background cache was not removed\nlogs: %s", GetLogs("onani"))
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if data, err := os.ReadFile(hostnameCache); err != nil || !bytes.Equal(data, cacheBody) {
+		t.Fatalf("hostname cache must survive the cleanup: %v %s", err, data)
+	}
+	if !strings.Contains(GetLogs("onani"), "removed retired storage: background-cache") {
+		t.Fatalf("cleanup not logged: %s", GetLogs("onani"))
+	}
 }
